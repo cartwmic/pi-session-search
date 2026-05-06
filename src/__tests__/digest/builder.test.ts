@@ -256,12 +256,12 @@ describe("buildPrompt — mode selection", () => {
 	it("systemPrompt instructs the model to produce the digest schema", () => {
 		const state = emptyBuilderState();
 		const { systemPrompt, userMessage } = buildPrompt(state, makeView(["hi"]), THRESHOLD, model);
-		// System prompt must mention the JSON schema fields. Some bridges (e.g.
-		// claude-bridge) drop ctx.systemPrompt, so the schema MUST also live in
-		// the user message — assert that too.
+		// Schema fields belong in the system prompt. Direct providers honor it,
+		// and the claude-bridge capture path (≥ commit 202ca4b) forwards it
+		// verbatim. The user message stays focused on the task.
 		assert.ok(systemPrompt.includes("body") && systemPrompt.includes("headline") && systemPrompt.includes("topics"));
-		assert.ok(userMessage.includes("body") && userMessage.includes("headline") && userMessage.includes("topics"),
-			"user message must restate the schema so claude-bridge-style prompt-stripping doesn't lose it");
+		assert.ok(userMessage.includes("submit_digest"),
+			"user message should instruct the model to call submit_digest");
 	});
 
 	it("incremental userMessage includes previous digest body", () => {

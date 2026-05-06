@@ -153,22 +153,18 @@ function serializeForPrompt(view: ConversationView): string {
 	return parts.join("\n\n");
 }
 
-// The digest builder uses **dual-channel output**: it offers the LLM a
-// `submit_digest` tool AND prompts it to emit JSON-only text. Whichever
-// arrives first wins. This dual approach is the deliberate fix for the
-// claude-bridge architectural mismatch where claude-bridge routes tool
-// calls back through pi's MCP layer (and `submit_digest` isn't a registered
-// pi tool), causing the call to hang indefinitely. With JSON-text fallback,
-// every provider path produces a digest:
-//   - Direct providers (openai, anthropic, google) typically prefer the tool
-//     call — returned in `response.content` as a `toolCall` entry. The system
-//     prompt is honored, so the schema lives there.
-//   - claude-bridge: tool call hangs in MCP routing AND the system prompt is
-//     replaced with a generic "helpful coding assistant" message. So the
-//     schema MUST be embedded in the user message text. The provider check
-//     in `makeCtx()` skips the tool channel; the user message constructor in
-//     `buildPrompt()` ALWAYS embeds the schema so the model sees it whether
-//     or not the system prompt survived.
+// The digest builder asks the LLM to call `submit_digest` exactly once with
+// a structured argument matching the SessionDigest schema. Direct providers
+// (openai, anthropic, google, mistral, openrouter) return the call as a
+// `toolCall` content block. claude-bridge ≥ commit 202ca4b classifies
+// non-pi-registered tools via `pi.getActiveTools()` and routes them through
+// the Claude Agent SDK's `outputFormat.json_schema` channel, synthesizing a
+// `toolCall` block from `result.structured_output`. On every working path,
+// `extractDigestArgs` finds the call and returns its arguments.
+//
+// Schema instructions live in the system prompt only — the bridge's capture
+// path forwards `ctx.systemPrompt` verbatim, and direct providers always
+// honor it.
 
 const SCHEMA_INSTRUCTIONS =
 	`Produce a JSON object with EXACTLY these fields (other field names will be rejected):\n` +
@@ -210,27 +206,21 @@ export function buildPrompt(
 
 	let userMessage: string;
 
-	// Always re-state the schema in the user message. The system prompt is
-	// stripped by some provider bridges (e.g. claude-bridge replaces it with a
-	// generic helper prompt), so the schema MUST also live in the user message
-	// to survive any provider's prompt rewriting.
 	if (mode === "incremental") {
 		const delta = extractDelta(view, state.lastWrittenMessageIndex);
 		const capped = capInput(delta, model, /* includesPrevDigest */ true);
 		const deltaText = serializeForPrompt(capped);
 		userMessage =
-			`Generate a session-digest JSON object. ${SCHEMA_INSTRUCTIONS}\n\n` +
 			`Previous digest:\n${state.lastDigest!.body}\n\n` +
 			`New messages since last digest:\n${deltaText}\n\n` +
 			`Update the digest if anything material changed. Otherwise repeat the previous digest verbatim. ` +
-			`Output the JSON object now (raw, no markdown fences).`;
+			`Call submit_digest now.`;
 	} else {
 		const capped = capInput(view, model, /* includesPrevDigest */ false);
 		const convText = serializeForPrompt(capped);
 		userMessage =
-			`Generate a session-digest JSON object. ${SCHEMA_INSTRUCTIONS}\n\n` +
 			`Here is the full conversation to digest:\n\n${convText}\n\n` +
-			`Output the JSON object now (raw, no markdown fences).`;
+			`Call submit_digest now.`;
 	}
 
 	return { mode, systemPrompt: SYSTEM_PROMPT_BASE, userMessage };
