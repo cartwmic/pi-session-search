@@ -63,14 +63,21 @@ function padEnd(str: string, len: number): string {
 }
 
 /**
- * Place `left` and `right` on a single line of `width` columns.
- * `left` is truncated/padded so `right` always fits flush against the right edge.
+ * Place plain-text `left` and `right` on a single line of `width` columns,
+ * applying `styleLeft` to the (already truncated) left text after layout so
+ * ANSI escapes can never be chopped mid-sequence.
  */
-function splitLine(left: string, right: string, width: number): string {
+function splitLine(
+  left: string,
+  right: string,
+  width: number,
+  styleLeft: (s: string) => string = (s) => s,
+): string {
   const rightLen = right.length;
   const leftMax = width - rightLen - 1;
-  const leftStr = leftMax > 0 ? padEnd(left.slice(0, leftMax), leftMax) : "";
-  return leftStr + " " + right;
+  if (leftMax <= 0) return styleLeft("") + " " + right;
+  const leftPlain = padEnd(left.slice(0, leftMax), leftMax);
+  return styleLeft(leftPlain) + " " + right;
 }
 
 // ─── Card renderer ────────────────────────────────────────────────────────────
@@ -101,8 +108,10 @@ function renderCard(
   const filePath = result.session.file;
 
   // Line 1: headline (bold) + date (right-aligned)
-  const headlineBold = theme.bold(headline.slice(0, innerWidth));
-  lines.push(marker + splitLine(headlineBold, date, innerWidth));
+  lines.push(
+    marker +
+      splitLine(headline, date, innerWidth, (s) => theme.bold(s)),
+  );
 
   // Line 2: topics (dim) — only when non-empty
   if (topics) {
@@ -130,6 +139,10 @@ const SEARCH_DEBOUNCE_MS = 150;
  * The TUI overlay component for /find-session.
  * Implements Component + Focusable.
  */
+// Maximum number of result cards to render in the visible viewport. Keeps the
+// overlay bounded so it can't outgrow the terminal as the user scrolls down.
+const MAX_VISIBLE_CARDS = 5;
+
 export class FindSessionOverlayComponent implements Component, Focusable {
   focused: boolean = false;
   wantsKeyRelease = false;
@@ -137,6 +150,7 @@ export class FindSessionOverlayComponent implements Component, Focusable {
   private query: string;
   private results: SearchResult[] = [];
   private selectedIndex: number = 0;
+  private scrollOffset: number = 0;
   private searching: boolean = false;
 
   private tui: TUI;
@@ -221,15 +235,34 @@ export class FindSessionOverlayComponent implements Component, Focusable {
         content.push("  Type a query to search sessions");
       }
     } else {
-      for (let i = 0; i < this.results.length; i++) {
+      // Keep the selected card in view by adjusting scrollOffset.
+      const total = this.results.length;
+      const visible = Math.min(MAX_VISIBLE_CARDS, total);
+      if (this.selectedIndex < this.scrollOffset) {
+        this.scrollOffset = this.selectedIndex;
+      } else if (this.selectedIndex >= this.scrollOffset + visible) {
+        this.scrollOffset = this.selectedIndex - visible + 1;
+      }
+      this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, total - visible));
+
+      const start = this.scrollOffset;
+      const end = Math.min(start + visible, total);
+
+      if (start > 0) {
+        content.push(this.theme.fg("dim", `  ↑ ${start} more above`));
+      }
+      for (let i = start; i < end; i++) {
         const result = this.results[i];
         const digest = this.index.getDigest(result.session.id);
         const selected = i === this.selectedIndex;
         const cardLines = renderCard(result, digest, selected, innerWidth, this.theme);
         content.push(...cardLines);
-        if (i < this.results.length - 1) {
+        if (i < end - 1) {
           content.push("");
         }
+      }
+      if (end < total) {
+        content.push(this.theme.fg("dim", `  ↓ ${total - end} more below`));
       }
     }
 
@@ -306,6 +339,10 @@ export class FindSessionOverlayComponent implements Component, Focusable {
     if (this.selectedIndex < this.results.length - 1) this.selectedIndex++;
   }
 
+  private resetScroll(): void {
+    this.scrollOffset = 0;
+  }
+
   private confirm(): void {
     if (this.results.length === 0) return;
     const selected = this.results[this.selectedIndex];
@@ -332,9 +369,11 @@ export class FindSessionOverlayComponent implements Component, Focusable {
     try {
       this.results = await this.index.search(q, 25);
       this.selectedIndex = 0;
+      this.resetScroll();
     } catch {
       this.results = [];
       this.selectedIndex = 0;
+      this.resetScroll();
     }
     this.searching = false;
     this.requestRender();
