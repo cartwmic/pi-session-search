@@ -208,8 +208,9 @@ describe("FindSessionOverlayComponent", () => {
       await flushAsync();
 
       const lines = component.render(80);
-      assert.ok(lines[0].startsWith("> "), "first line should be query bar");
-      assert.ok(lines[0].includes("hello"), "query bar should show current query");
+      // Line 0 is the top border; line 1 is the query bar (wrapped in side borders).
+      assert.ok(lines[1].includes("> "), "second line should contain the query bar prompt");
+      assert.ok(lines[1].includes("hello"), "query bar should show current query");
     });
   });
 
@@ -231,14 +232,14 @@ describe("FindSessionOverlayComponent", () => {
       // Initially first card is selected (▶)
       const before = component.render(80);
       const firstCardBefore = before.find(l => l.includes("Alpha Headline"));
-      assert.ok(firstCardBefore?.startsWith("▶"), "first card should be selected initially");
+      assert.ok(firstCardBefore?.includes("▶"), "first card should be selected initially");
 
       // Press down
       component.handleInput("\x1b[B");
 
       const after = component.render(80);
       const secondCardAfter = after.find(l => l.includes("Beta Headline"));
-      assert.ok(secondCardAfter?.startsWith("▶"), "second card should be selected after down arrow");
+      assert.ok(secondCardAfter?.includes("▶"), "second card should be selected after down arrow");
     });
 
     it("up arrow moves selection to previous card", async () => {
@@ -261,7 +262,7 @@ describe("FindSessionOverlayComponent", () => {
       // First result should be selected again — check it starts with ▶
       // r1 has no digest, fallback to session.name = "Test Session"
       const firstLine = lines.find(l => l.includes("Test Session"));
-      assert.ok(firstLine?.startsWith("▶"), "first card should be selected again after up arrow");
+      assert.ok(firstLine?.includes("▶"), "first card should be selected again after up arrow");
     });
 
     it("down arrow does not go past the last result", async () => {
@@ -280,7 +281,7 @@ describe("FindSessionOverlayComponent", () => {
 
       const lines = component.render(80);
       // Should still show the single card as selected
-      assert.ok(lines.some(l => l.startsWith("▶")), "card should still be selected");
+      assert.ok(lines.some(l => l.includes("▶")), "card should still be selected");
     });
 
     it("up arrow does not go before the first result", async () => {
@@ -296,7 +297,7 @@ describe("FindSessionOverlayComponent", () => {
       component.handleInput("\x1b[A");
 
       const lines = component.render(80);
-      assert.ok(lines.some(l => l.startsWith("▶")), "card should still be selected");
+      assert.ok(lines.some(l => l.includes("▶")), "card should still be selected");
     });
   });
 
@@ -446,8 +447,8 @@ describe("FindSessionOverlayComponent", () => {
 
       component.handleInput("\x7f");
       const lines = component.render(80);
-      assert.ok(lines[0].includes("hell"), "query bar should show 'hell' after backspace");
-      assert.ok(!lines[0].includes("hello"), "query bar should not include 'o' after backspace");
+      assert.ok(lines[1].includes("hell"), "query bar should show 'hell' after backspace");
+      assert.ok(!lines[1].includes("hello"), "query bar should not include 'o' after backspace");
     });
 
     it("typing characters appends to query", async () => {
@@ -459,7 +460,7 @@ describe("FindSessionOverlayComponent", () => {
 
       component.handleInput("x");
       const lines = component.render(80);
-      assert.ok(lines[0].includes("authx"), "typed char should be appended to query");
+      assert.ok(lines[1].includes("authx"), "typed char should be appended to query");
     });
   });
 });

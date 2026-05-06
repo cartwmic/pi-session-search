@@ -15,7 +15,7 @@
  */
 
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { CURSOR_MARKER } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { SearchResult } from "../index/session-index.js";
@@ -174,43 +174,76 @@ export class FindSessionOverlayComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    const lines: string[] = [];
+    // Reserve 2 columns for the left/right border, plus 1 column of inner
+    // padding on each side so content doesn't touch the frame.
+    const frameOverhead = 4; // "│ " + " │"
+    const innerWidth = Math.max(width - frameOverhead, 10);
+    const horizontalRun = innerWidth + 2; // run between corners (covers padding)
 
-    // ── Query bar ──────────────────────────────────────────────────────────
+    const border = (s: string) => this.theme.fg("border", s);
+    const top = border("┌" + "─".repeat(horizontalRun) + "┐");
+    const sep = border("├" + "─".repeat(horizontalRun) + "┤");
+    const bottom = border("└" + "─".repeat(horizontalRun) + "┘");
+    const side = border("│");
+
+    // Wrap a single content line with side borders, padding/truncating to innerWidth.
+    const wrap = (line: string): string => {
+      const w = visibleWidth(line);
+      let body: string;
+      if (w > innerWidth) {
+        body = truncateToWidth(line, innerWidth, "…", false);
+        // truncateToWidth may not pad; ensure exact width.
+        const bw = visibleWidth(body);
+        if (bw < innerWidth) body = body + " ".repeat(innerWidth - bw);
+      } else {
+        body = line + " ".repeat(innerWidth - w);
+      }
+      return `${side} ${body} ${side}`;
+    };
+
+    // ── Build inner content (no borders yet) ───────────────────────────────
+    const content: string[] = [];
+
+    // Query bar
     const queryPrefix = "> ";
     const queryDisplay = this.query + (this.focused ? CURSOR_MARKER : "");
-    lines.push(queryPrefix + queryDisplay);
-    lines.push("─".repeat(width));
+    content.push(queryPrefix + queryDisplay);
+    // Marker so we can splice the in-frame separator at the right spot.
+    const SEP_MARKER = "\u0000__SEP__\u0000";
+    content.push(SEP_MARKER);
 
-    // ── Searching indicator ────────────────────────────────────────────────
     if (this.searching) {
-      lines.push("  Searching…");
-      return lines;
-    }
-
-    // ── Empty state ────────────────────────────────────────────────────────
-    if (this.results.length === 0) {
+      content.push("  Searching…");
+    } else if (this.results.length === 0) {
       if (this.query.trim()) {
-        lines.push("  No sessions match this query");
+        content.push("  No sessions match this query");
       } else {
-        lines.push("  Type a query to search sessions");
+        content.push("  Type a query to search sessions");
       }
-      return lines;
-    }
-
-    // ── Result cards ───────────────────────────────────────────────────────
-    for (let i = 0; i < this.results.length; i++) {
-      const result = this.results[i];
-      const digest = this.index.getDigest(result.session.id);
-      const selected = i === this.selectedIndex;
-      const cardLines = renderCard(result, digest, selected, width, this.theme);
-      lines.push(...cardLines);
-      // Separator between cards (not after the last one)
-      if (i < this.results.length - 1) {
-        lines.push("");
+    } else {
+      for (let i = 0; i < this.results.length; i++) {
+        const result = this.results[i];
+        const digest = this.index.getDigest(result.session.id);
+        const selected = i === this.selectedIndex;
+        const cardLines = renderCard(result, digest, selected, innerWidth, this.theme);
+        content.push(...cardLines);
+        if (i < this.results.length - 1) {
+          content.push("");
+        }
       }
     }
 
+    // ── Compose with frame ────────────────────────────────────────────────
+    const lines: string[] = [];
+    lines.push(top);
+    for (const c of content) {
+      if (c === SEP_MARKER) {
+        lines.push(sep);
+      } else {
+        lines.push(wrap(c));
+      }
+    }
+    lines.push(bottom);
     return lines;
   }
 
