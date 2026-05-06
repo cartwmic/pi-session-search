@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — digest-driven indexing (`add-digest-driven-indexing`)
+## [2.0.0] — 2026-05-06 — digest-driven indexing (`add-digest-driven-indexing`)
 
 ### Summary
 
