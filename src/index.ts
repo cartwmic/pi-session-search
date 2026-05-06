@@ -215,22 +215,11 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(msg, level),
 			);
 
-			// DEBUG: surface index-mode resolution so we can see why fts-raw was chosen.
-			ctx.ui.notify(
-				`session-search [startIndex]: config=${config ? "loaded" : "NULL"} embedder=${config?.embedder ? "present" : "MISSING"}`,
-				"info",
-			);
-
 			if (config?.embedder) {
 				const embedder = createEmbedder(config.embedder, (msg, level) =>
 					ctx.ui.notify(msg, level),
 				);
 				if (!embedder) {
-					// createEmbedder already notified the user; fall back to fts-raw
-					ctx.ui.notify(
-						"session-search [startIndex]: createEmbedder returned null — falling back to FtsSessionIndex",
-						"warning",
-					);
 					sessionIndex = new FtsSessionIndex(
 						getIndexDir(),
 						config.extraSessionDirs ?? [],
