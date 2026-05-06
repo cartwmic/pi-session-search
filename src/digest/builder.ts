@@ -306,46 +306,18 @@ export async function generateDigest(
 		tools: [submitDigestTool],
 	});
 
-	// Extract digest args from a response. Tries the tool call first, then falls
-	// back to parsing JSON text from the assistant message's text content.
-	// The fallback is essential for claude-bridge: it routes tool calls back
-	// through pi's MCP layer where `submit_digest` isn't registered, causing
-	// the call to hang. The dual-channel prompt makes the model also emit JSON
-	// text, which this parser extracts.
+	// Extract digest args from a `submit_digest` tool call in the response.
+	// Direct providers return the call as a toolCall content block. claude-bridge
+	// (≥ commit 202ca4b) synthesizes a toolCall block from outputFormat.json_schema
+	// structured_output. If the model fails to call the tool, return null so the
+	// caller can retry with a stricter prompt.
 	function extractDigestArgs(response: AssistantMessage): unknown | null {
-		// 1. Tool call (preferred for direct providers)
 		const toolCall = response.content.find(
 			(c): c is ToolCall =>
 				(c as ToolCall).type === "toolCall" &&
 				(c as ToolCall).name === "submit_digest",
 		) as ToolCall | undefined;
-		if (toolCall && toolCall.arguments) return toolCall.arguments;
-
-		// 2. JSON text fallback (essential for claude-bridge)
-		const textParts: string[] = [];
-		for (const c of response.content) {
-			if ((c as { type?: string }).type === "text" && typeof (c as { text?: string }).text === "string") {
-				textParts.push((c as { text: string }).text);
-			}
-		}
-		if (textParts.length === 0) return null;
-		const text = textParts.join("\n");
-
-		// Strip markdown code fences if present (model often wraps JSON in ```json ... ```)
-		const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-		const stripped = fenced ? fenced[1] : text;
-
-		// Find the first JSON object in the text
-		const start = stripped.indexOf("{");
-		const end = stripped.lastIndexOf("}");
-		if (start === -1 || end === -1 || end <= start) return null;
-		const jsonStr = stripped.slice(start, end + 1);
-
-		try {
-			return JSON.parse(jsonStr);
-		} catch {
-			return null;
-		}
+		return toolCall?.arguments ?? null;
 	}
 
 	const attemptCall = async (
