@@ -542,10 +542,31 @@ export class SessionIndex {
           // Task 6.3: in digest-mode, load digest (may be null for un-digested)
           const digest = this.mode === "digest-mode" ? loadDigest(item.id) : null;
           parsed.push({ item, session, digest });
+        } else if (session) {
+          // Session parsed (valid header) but has no user messages —
+          // synthetic/empty/fixture file. Record metadata-only so it's not
+          // re-discovered as "new" on every sync (which would loop forever
+          // and freeze the status line). Will only be re-attempted if the
+          // file's sizeBytes changes.
+          this.data.sessions[item.id] = {
+            session: stripHeavyFields(session),
+            digest: null,
+            embedding: [],
+            mtimeMs: item.mtimeMs,
+            sizeBytes: item.sizeBytes,
+          };
         }
+        // else (parseSession returned null): file is unparseable; intentionally
+        // not persisted so a future fix to parser can rediscover it. These are
+        // rare and don't accumulate.
       }
 
-      if (parsed.length === 0) continue;
+      if (parsed.length === 0) {
+        onProgress?.(
+          `Indexed ${Math.min(i + BATCH_SIZE, toEmbed.length)}/${toEmbed.length}...`,
+        );
+        continue;
+      }
 
       if (this.mode === "digest-mode") {
         // Task 6.3: digest-mode — include ALL sessions in metadata, but only

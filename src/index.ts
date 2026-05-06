@@ -278,6 +278,10 @@ export default function (pi: ExtensionAPI) {
 								`Sessions: ${parts.join(" ")} (${sessionIndex!.size()} total)`,
 							);
 							setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
+						} else {
+							// No changes — ensure any mid-sync "Indexing N sessions..."
+							// status from onProgress is cleared rather than left stuck.
+							ctx.ui.setStatus("session-search", "");
 						}
 					}
 				})
