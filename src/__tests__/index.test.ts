@@ -5,11 +5,12 @@ import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 
 // ─── Imports under test ──────────────────────────────────────────────
 
-import { toFtsQuery, buildContent } from "../fts-index";
+import { toFtsQuery, buildContent } from "../index/fts-index";
 import { parseSession } from "../parser";
-import { encodeEmbedding, decodeEmbedding } from "../session-index";
+import { encodeEmbedding, decodeEmbedding } from "../index/session-index";
 import { loadConfig } from "../config";
 import { truncate, slugToProject, buildSummary, formatRelativeDate, pathToSlug } from "../utils";
+import { createEmbedder, type EmbedderConfig } from "../embedder";
 
 // ─── toFtsQuery ──────────────────────────────────────────────────────
 
@@ -358,5 +359,298 @@ describe("pathToSlug", () => {
   it("handles paths not under HOME", () => {
     const slug = pathToSlug("/tmp/some/project");
     assert.equal(slug, "-tmp-some-project");
+  });
+});
+
+// ─── createEmbedder ──────────────────────────────────────────────────
+
+describe("createEmbedder", () => {
+  // ── Null / no-key cases ──────────────────────────────────────────
+
+  it("returns null and calls notify (warning) when no key resolves", () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+
+    let notifyMsg = "";
+    let notifyLevel = "";
+    const result = createEmbedder(
+      { baseUrl: "https://api.openai.com", model: "text-embedding-3-small" },
+      (msg, level) => {
+        notifyMsg = msg;
+        notifyLevel = level;
+      }
+    );
+
+    assert.equal(result, null);
+    assert.ok(notifyMsg.includes("fts-raw"), "notify message should mention fts-raw");
+    assert.equal(notifyLevel, "warning");
+
+    if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
+  });
+
+  it("returns an embedder (not null) when OPENAI_API_KEY env is set", () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-env-key";
+
+    const result = createEmbedder({
+      baseUrl: "https://api.openai.com",
+      model: "text-embedding-3-small",
+    });
+    assert.ok(result !== null, "expected embedder to be constructed");
+
+    process.env.OPENAI_API_KEY = saved ?? "";
+    if (!saved) delete process.env.OPENAI_API_KEY;
+  });
+
+  // ── apiKeyEnv resolution ─────────────────────────────────────────
+
+  it("resolves API key from apiKeyEnv when apiKey is absent", () => {
+    const envName = "TEST_EMBED_KEY_" + Date.now();
+    process.env[envName] = "sk-from-env-var";
+
+    const result = createEmbedder({
+      baseUrl: "https://api.openai.com",
+      model: "text-embedding-3-small",
+      apiKeyEnv: envName,
+    });
+    assert.ok(result !== null, "expected embedder to be constructed from apiKeyEnv");
+
+    delete process.env[envName];
+  });
+
+  it("prefers explicit apiKey over apiKeyEnv", async () => {
+    const envName = "TEST_EMBED_KEY_LOWER_" + Date.now();
+    process.env[envName] = "sk-from-env";
+
+    let usedKey = "";
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
+      const auth = (opts.headers as Record<string, string>)["Authorization"] ?? "";
+      usedKey = auth.replace("Bearer ", "");
+      return {
+        ok: true,
+        json: async () => ({ data: [{ index: 0, embedding: [0.1] }] }),
+      } as Response;
+    };
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "text-embedding-3-small",
+        apiKey: "sk-explicit",
+        apiKeyEnv: envName,
+      });
+      assert.ok(embedder !== null);
+      await embedder!.embed("test");
+      assert.equal(usedKey, "sk-explicit");
+    } finally {
+      globalThis.fetch = savedFetch;
+      delete process.env[envName];
+    }
+  });
+
+  // ── dimensions passthrough ───────────────────────────────────────
+
+  it("includes dimensions in request body when configured", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
+      capturedBody = JSON.parse(opts.body as string);
+      return {
+        ok: true,
+        json: async () => ({ data: [{ index: 0, embedding: [0.1, 0.2] }] }),
+      } as Response;
+    };
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "test-model",
+        apiKey: "sk-test",
+        dimensions: 512,
+      });
+      assert.ok(embedder !== null);
+      await embedder!.embed("hello");
+      assert.equal(capturedBody["dimensions"], 512);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it("omits dimensions from request body when not configured", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
+      capturedBody = JSON.parse(opts.body as string);
+      return {
+        ok: true,
+        json: async () => ({ data: [{ index: 0, embedding: [0.1, 0.2] }] }),
+      } as Response;
+    };
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "test-model",
+        apiKey: "sk-test",
+      });
+      assert.ok(embedder !== null);
+      await embedder!.embed("hello");
+      assert.ok(!("dimensions" in capturedBody), "dimensions should be absent");
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  // ── custom headers passthrough ───────────────────────────────────
+
+  it("merges custom headers into every request", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
+      capturedHeaders = opts.headers as Record<string, string>;
+      return {
+        ok: true,
+        json: async () => ({ data: [{ index: 0, embedding: [0.3] }] }),
+      } as Response;
+    };
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "test-model",
+        apiKey: "sk-test",
+        headers: { "X-Custom-Header": "my-value", "X-Org": "org-123" },
+      });
+      assert.ok(embedder !== null);
+      await embedder!.embed("hello");
+      assert.equal(capturedHeaders["X-Custom-Header"], "my-value");
+      assert.equal(capturedHeaders["X-Org"], "org-123");
+      assert.ok(capturedHeaders["Authorization"].startsWith("Bearer "), "Authorization still set");
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  // ── batch size ───────────────────────────────────────────────────
+
+  it("batches 250 inputs into 3 HTTP calls (100 + 100 + 50)", async () => {
+    let callCount = 0;
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
+      callCount++;
+      const body = JSON.parse(opts.body as string) as { input: string[] };
+      const data = body.input.map((_, i) => ({ index: i, embedding: [0.1] }));
+      return {
+        ok: true,
+        json: async () => ({ data }),
+      } as Response;
+    };
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "test-model",
+        apiKey: "sk-test",
+      });
+      assert.ok(embedder !== null);
+      const texts = Array.from({ length: 250 }, (_, i) => `text ${i}`);
+      const results = await embedder!.embedBatch(texts);
+      assert.equal(callCount, 3, "should make 3 batched requests");
+      assert.equal(results.length, 250);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  // ── input truncation ─────────────────────────────────────────────
+
+  it("truncates inputs longer than 12000 chars before sending", async () => {
+    let sentInput = "";
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
+      const body = JSON.parse(opts.body as string) as { input: string[] };
+      sentInput = body.input[0];
+      return {
+        ok: true,
+        json: async () => ({ data: [{ index: 0, embedding: [0.1] }] }),
+      } as Response;
+    };
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "test-model",
+        apiKey: "sk-test",
+      });
+      assert.ok(embedder !== null);
+      const longText = "a".repeat(50000);
+      await embedder!.embed(longText);
+      assert.equal(sentInput.length, 12000);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  // ── API error surfacing ──────────────────────────────────────────
+
+  it("throws on non-ok HTTP response including status and body", async () => {
+    const savedFetch = globalThis.fetch;
+    (globalThis as any).fetch = async () => ({
+      ok: false,
+      status: 401,
+      text: async () => '{"error": "invalid api key"}',
+    } as Response);
+
+    try {
+      const embedder = createEmbedder({
+        baseUrl: "https://api.openai.com",
+        model: "test-model",
+        apiKey: "sk-bad",
+      });
+      assert.ok(embedder !== null);
+      await assert.rejects(
+        () => embedder!.embed("hello"),
+        /Embeddings API 401/
+      );
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  // ── Legacy type migration ────────────────────────────────────────
+
+  it("returns null and emits error notify for legacy type 'bedrock'", () => {
+    let notifyMsg = "";
+    let notifyLevel = "";
+    const config = {
+      type: "bedrock",
+      baseUrl: "https://bedrock.example.com",
+      model: "amazon.titan-embed-text-v2:0",
+    } as unknown as EmbedderConfig;
+
+    const result = createEmbedder(config, (msg, level) => {
+      notifyMsg = msg;
+      notifyLevel = level;
+    });
+
+    assert.equal(result, null);
+    assert.ok(notifyMsg.includes("bedrock"), "notify message should mention the legacy type");
+    assert.equal(notifyLevel, "error");
+  });
+
+  it("silently accepts legacy type 'openai-compatible' and constructs embedder", () => {
+    const config = {
+      type: "openai-compatible",
+      baseUrl: "https://api.openai.com",
+      model: "text-embedding-3-small",
+      apiKey: "sk-ok",
+    } as unknown as EmbedderConfig;
+
+    let notified = false;
+    const result = createEmbedder(config, () => { notified = true; });
+
+    assert.ok(result !== null, "should construct embedder");
+    assert.ok(!notified, "should not have called notify");
   });
 });

@@ -5,3 +5,7 @@ dist/
 *.js.map
 !jest.config.js
 .pi/
+.claude/
+.codex/
+progress.md
+tests/.test-output/

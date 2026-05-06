@@ -42,6 +42,20 @@ export function formatRelativeDate(iso: string): string {
   return months <= 1 ? "last month" : `${months}mo ago`;
 }
 
+/**
+ * Resolve the root directory for session-search state (`~/.pi/session-search` by default).
+ * Tests and embedded host environments can override via `PI_SESSION_SEARCH_HOME` so isolating
+ * session-search files does not require overriding `$HOME` (which would break Claude Code
+ * SDK / claude-bridge keychain auth).
+ *
+ * Returns the **directory containing** `digests/`, `digest.json`, `config.json`, `index/`.
+ */
+export function sessionSearchHome(): string {
+  const override = process.env.PI_SESSION_SEARCH_HOME;
+  if (override && override.length > 0) return override;
+  return `${process.env.HOME ?? "~"}/.pi/session-search`;
+}
+
 /** Convert a cwd path to a project slug for filtering. */
 export function pathToSlug(cwd: string): string {
   const home = process.env.HOME || "";
@@ -50,11 +64,32 @@ export function pathToSlug(cwd: string): string {
 }
 
 import type { ParsedSession } from "./parser";
+import type { SessionDigest } from "./digest/schema";
 
-/** Build a display summary for a session. */
-export function buildSummary(s: ParsedSession): string {
+/**
+ * Build a display summary for a session (task 6.9).
+ *
+ * @param s       Parsed session metadata
+ * @param digest  Optional digest:
+ *   - SessionDigest  → use digest.headline for name; include digest.body excerpt
+ *   - null           → digest-mode but no digest yet; show fallback + notice
+ *   - undefined      → raw mode; use existing name/firstUserMessage logic
+ */
+export function buildSummary(s: ParsedSession, digest?: SessionDigest | null): string {
   const lines: string[] = [];
-  const name = s.name || truncate(s.firstUserMessage, 80);
+
+  let name: string;
+  if (digest != null) {
+    // Has a digest — use headline
+    name = digest.headline;
+  } else if (digest === null) {
+    // digest-mode but no digest yet — canonical fallback (task 6.9)
+    name = truncate(s.firstUserMessage, 80) + " (no digest \u2014 run /digest:update)";
+  } else {
+    // undefined = raw mode — existing behavior
+    name = s.name || truncate(s.firstUserMessage, 80);
+  }
+
   const date = s.startedAt.split("T")[0];
   const project = slugToProject(s.projectSlug);
 
@@ -80,7 +115,12 @@ export function buildSummary(s: ParsedSession): string {
     lines.push(`Modified: ${s.filesModified.slice(0, 10).join(", ")}`);
   }
 
-  if (s.compactionSummaries?.length) {
+  if (digest != null) {
+    // Digest body is the primary content surface
+    lines.push(`\n${truncate(digest.body, 500)}`);
+    if (digest.outcome) lines.push(`Outcome: ${digest.outcome}`);
+    if (digest.topics?.length) lines.push(`Topics: ${digest.topics.join(", ")}`);
+  } else if (s.compactionSummaries?.length) {
     lines.push(`\nCompaction summaries:`);
     for (const cs of s.compactionSummaries) {
       lines.push(truncate(cs, 500));

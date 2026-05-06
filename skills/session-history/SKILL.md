@@ -14,6 +14,8 @@ This skill provides three tools:
 ### session_search
 Semantic search across all indexed sessions. Use for finding sessions by topic, technology, or intent.
 
+In **digest-mode** (the default when a digest model is available), results include the session's `digest.headline` (≤80 char display title) and a `digest.body` excerpt (200–400 word prose summary written by the LLM). In `fts-raw`/`hybrid-raw` modes, results show the raw first-user-message excerpt.
+
 ```
 session_search(query="refactoring the auth module")
 session_search(query="Lambda timeout debugging", limit=5)
@@ -22,6 +24,8 @@ session_search(query="setting up CI pipeline for Nessie")
 
 ### session_list
 Browse sessions with filters. Good for time-based queries or project-specific browsing.
+
+In digest-mode, listed sessions show `digest.headline` when available; un-digested sessions fall back to a truncated first user message with a `(no digest — run /digest:update)` suffix.
 
 ```
 session_list(project="Rosie")                    # Sessions in the Rosie project
@@ -40,15 +44,31 @@ session_read(session="...", offset=50, limit=50)           # Pagination for long
 session_read(session="...", include_tools=true)             # Include tool call results
 ```
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/find-session [query]` | Open the interactive session search overlay; select a card to switch to that session |
+| `/session-embeddings-setup` | Configure the embedder for hybrid/digest search |
+| `/session-sync` | Force an immediate incremental re-sync |
+| `/session-reindex` | Force a full re-index of all sessions |
+| `/digest:settings` | Show config; create `~/.pi/session-search/digest.json` with defaults if absent |
+| `/digest:show` | Show the current session's stored digest |
+| `/digest:update` | Trigger an immediate digest write for the current session |
+| `/digest:rewrite` | Force a full re-summarize (ignores prior digest) |
+| `/digest:backfill` | Digest all historical sessions that lack a digest |
+| `/digest:cost` | Show LLM token and cost usage for this process |
+
 ## Workflow
 
 1. **Find sessions**: Use `session_search` for semantic queries or `session_list` for browsing
-2. **Read details**: Use `session_read` with the file path from results to see the full conversation
-3. **Extract context**: Use information from past sessions to inform current work
+2. **Interactive pick**: Use `/find-session <query>` to open a card overlay and switch directly
+3. **Read details**: Use `session_read` with the file path from results to see the full conversation
+4. **Extract context**: Use information from past sessions to inform current work
 
 ## Setup
 
-If not yet configured, run `/session-embeddings-setup` to choose an embedding provider (OpenAI, Bedrock, or Ollama).
+Run `/session-embeddings-setup` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/digest:settings` and `/digest:backfill` to enable digest-mode for best recall.
 
 To force a full re-index, run `/session-reindex`.
 
@@ -56,13 +76,13 @@ To force a full re-index, run `/session-reindex`.
 
 - All active sessions from `~/.pi/agent/sessions/`
 - All archived sessions from `~/.pi/agent/sessions-archive/`
-- User messages, assistant responses, tool usage patterns
-- Compaction summaries (condensed session context)
-- Files read/modified, models used, project directories
+- **In digest-mode**: `digest.body` (LLM-written 200–400 word prose) and `digest.headline` (≤80 char title)
+- **In raw modes**: user messages, compaction summaries, files modified
 
 ## Tips
 
-- Session search is best for "when did we...", "how did we handle...", "what approach did we use for..." queries
-- Session list is best for "show me recent sessions", "what did we work on in project X" queries
+- In digest-mode, `session_search` result cards show `digest.headline` + a `digest.body` excerpt — this is what you want for "when did we…" and "what approach did we use for…" queries
+- Session search is best for semantic queries; session list is best for "show me recent sessions" or "what did we work on in project X"
 - For very long sessions, use `session_read` with pagination (`offset`/`limit`)
 - Set `include_tools=true` on `session_read` when you need to see the actual tool outputs (verbose)
+- Run `/digest:backfill` after first setup to digest historical sessions; new sessions are digested live automatically

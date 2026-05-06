@@ -1,6 +1,8 @@
 /**
- * Embedding interface + factory. Reuses the same provider patterns as
- * pi-knowledge-search but lives in this package to avoid a hard dependency.
+ * Embedding interface + factory.
+ * Single OpenAI-compatible embedder — calls POST <baseUrl>/v1/embeddings.
+ * Bedrock, Mistral, and Ollama provider-specific classes have been removed;
+ * those endpoints are reachable via baseUrl configuration.
  */
 
 export interface Embedder {
@@ -11,74 +13,74 @@ export interface Embedder {
   ): Promise<(number[] | null)[]>;
 }
 
+/** New flat config — no `type` discriminator. */
 export interface EmbedderConfig {
-  type: "openai" | "bedrock" | "ollama" | "mistral" | "openai-compatible";
-  // OpenAI / Mistral / OpenAI-compatible
+  /** Required. e.g. "https://api.openai.com" */
+  baseUrl: string;
+  /** Required. e.g. "text-embedding-3-small" */
+  model: string;
+  /** Explicit API key. Takes precedence over apiKeyEnv and OPENAI_API_KEY. */
   apiKey?: string;
-  model?: string;
-  baseUrl?: string;
-  // Bedrock
-  profile?: string;
-  region?: string;
-  // Ollama
-  url?: string;
-  // Shared
+  /** Name of env var to read for the key. Fallback if apiKey is absent. */
+  apiKeyEnv?: string;
+  /** Optional dimensions, passed through to the API when set. */
   dimensions?: number;
+  /** Optional extra headers merged into every request. */
+  headers?: Record<string, string>;
 }
 
-const DEFAULTS: Record<string, Partial<EmbedderConfig>> = {
-  openai: { model: "text-embedding-3-small", dimensions: 512, baseUrl: "https://api.openai.com" },
-  bedrock: {
-    model: "amazon.titan-embed-text-v2:0",
-    region: "us-east-1",
-    profile: "default",
-    dimensions: 512,
-  },
-  ollama: { model: "nomic-embed-text", url: "http://localhost:11434" },
-  mistral: { model: "mistral-embed", dimensions: 1024, baseUrl: "https://api.mistral.ai" },
-  "openai-compatible": { model: "text-embedding-3-small", dimensions: 512 },
-};
-
-export function createEmbedder(config: EmbedderConfig): Embedder {
-  const defaults = DEFAULTS[config.type] ?? {};
-  const merged = { ...defaults, ...config };
-
-  switch (merged.type) {
-    case "openai":
-      return new OpenAICompatibleEmbedder(
-        merged.apiKey || process.env.OPENAI_API_KEY || "",
-        merged.model!,
-        merged.dimensions!,
-        merged.baseUrl || "https://api.openai.com"
+/**
+ * Factory. Returns null (and fires notify) in two cases:
+ *   1. Legacy `type` field with a non-openai-compatible value.
+ *   2. No API key resolvable after checking apiKey → apiKeyEnv → OPENAI_API_KEY.
+ *
+ * @param config   EmbedderConfig (may carry a legacy `type` field at runtime).
+ * @param notify   Optional callback for user-visible warnings, matches
+ *                 ctx.ui.notify(message, level) from the extension API.
+ */
+export function createEmbedder(
+  config: EmbedderConfig,
+  notify?: (message: string, level: string) => void
+): Embedder | null {
+  // ── Task 1.11: legacy type migration ──────────────────────────────
+  // At runtime a user's existing config.json may still carry the upstream
+  // `type` discriminator field.  Cast to any to inspect it.
+  const raw = config as EmbedderConfig & { type?: string };
+  if (raw.type !== undefined) {
+    if (raw.type !== "openai-compatible") {
+      notify?.(
+        `session-search: legacy embedder type '${raw.type}' is no longer supported. ` +
+          `Run /session-embeddings-setup to reconfigure with a /v1/embeddings-compatible ` +
+          `endpoint (e.g., LiteLLM proxy).`,
+        "error"
       );
-    case "mistral":
-      return new OpenAICompatibleEmbedder(
-        merged.apiKey || process.env.MISTRAL_API_KEY || "",
-        merged.model!,
-        merged.dimensions!,
-        merged.baseUrl || "https://api.mistral.ai"
-      );
-    case "openai-compatible": {
-      if (!merged.baseUrl) throw new Error("openai-compatible requires baseUrl");
-      return new OpenAICompatibleEmbedder(
-        merged.apiKey || "",
-        merged.model!,
-        merged.dimensions!,
-        merged.baseUrl
-      );
+      return null;
     }
-    case "bedrock":
-      return new BedrockEmbedder(
-        merged.profile!,
-        merged.region!,
-        merged.model!,
-        merged.dimensions!
-      );
-    case "ollama":
-      return new OllamaEmbedder(merged.url!, merged.model!);
-    default:
-      throw new Error(`Unknown embedder type: ${merged.type}`);
+    // type === "openai-compatible" → silently strip; fall through to construction
   }
+
+  // ── Task 1.6: apiKey resolution ───────────────────────────────────
+  const key =
+    config.apiKey ||
+    (config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined) ||
+    process.env.OPENAI_API_KEY;
+
+  if (!key) {
+    notify?.(
+      "session-search: embedder configured but no API key resolvable. " +
+        "Set apiKey, apiKeyEnv, or OPENAI_API_KEY in env. Falling back to fts-raw mode.",
+      "warning"
+    );
+    return null;
+  }
+
+  return new OpenAICompatibleEmbedder(
+    key,
+    config.model,
+    config.baseUrl,
+    config.dimensions,
+    config.headers
+  );
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -87,28 +89,7 @@ function truncate(text: string, maxChars = 12000): string {
   return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
 
-async function parallelMap<T, R>(
-  items: T[],
-  fn: (item: T) => Promise<R>,
-  concurrency: number,
-  signal?: AbortSignal
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < items.length) {
-      if (signal?.aborted) throw new Error("Aborted");
-      const idx = cursor++;
-      results[idx] = await fn(items[idx]);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => worker())
-  );
-  return results;
-}
-
-// ─── OpenAI-Compatible (OpenAI, Mistral, Together, Fireworks, etc.) ──
+// ─── OpenAI-Compatible ────────────────────────────────────────────────
 
 class OpenAICompatibleEmbedder implements Embedder {
   private endpoint: string;
@@ -116,8 +97,9 @@ class OpenAICompatibleEmbedder implements Embedder {
   constructor(
     private apiKey: string,
     private model: string,
-    private dimensions: number,
-    baseUrl: string
+    baseUrl: string,
+    private dimensions?: number,
+    private extraHeaders?: Record<string, string>
   ) {
     this.endpoint = `${baseUrl.replace(/\/$/, "")}/v1/embeddings`;
   }
@@ -143,8 +125,8 @@ class OpenAICompatibleEmbedder implements Embedder {
         input: batch,
         model: this.model,
       };
-      // Mistral doesn't support the dimensions parameter
-      if (this.dimensions && !this.endpoint.includes("mistral.ai")) {
+      // Only include dimensions when explicitly configured
+      if (this.dimensions !== undefined) {
         body.dimensions = this.dimensions;
       }
 
@@ -153,6 +135,8 @@ class OpenAICompatibleEmbedder implements Embedder {
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
+          // Task 1.7: merge custom headers (may override defaults except Authorization)
+          ...this.extraHeaders,
         },
         body: JSON.stringify(body),
         signal,
@@ -160,7 +144,9 @@ class OpenAICompatibleEmbedder implements Embedder {
 
       if (!res.ok) {
         const errBody = await res.text();
-        throw new Error(`Embeddings API ${res.status}: ${errBody.slice(0, 200)}`);
+        throw new Error(
+          `Embeddings API ${res.status}: ${errBody.slice(0, 200)}`
+        );
       }
 
       const json = (await res.json()) as {
@@ -171,111 +157,5 @@ class OpenAICompatibleEmbedder implements Embedder {
       }
     }
     return results;
-  }
-}
-
-// ─── Bedrock ─────────────────────────────────────────────────────────
-
-class BedrockEmbedder implements Embedder {
-  private clientPromise: Promise<any>;
-
-  constructor(
-    profile: string,
-    region: string,
-    private model: string,
-    private dimensions: number
-  ) {
-    this.clientPromise = (async () => {
-      const { BedrockRuntimeClient } = await import(
-        "@aws-sdk/client-bedrock-runtime"
-      );
-      const { fromIni } = await import("@aws-sdk/credential-providers");
-      return new BedrockRuntimeClient({
-        region,
-        credentials: fromIni({ profile }),
-      });
-    })();
-  }
-
-  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
-    const [result] = await this.embedBatch([text], signal);
-    if (!result) throw new Error("Embedding failed");
-    return result;
-  }
-
-  async embedBatch(
-    texts: string[],
-    signal?: AbortSignal
-  ): Promise<(number[] | null)[]> {
-    const client = await this.clientPromise;
-    return parallelMap(
-      texts,
-      async (text) => {
-        const { InvokeModelCommand } = await import(
-          "@aws-sdk/client-bedrock-runtime"
-        );
-        const body = JSON.stringify({
-          inputText: truncate(text),
-          dimensions: this.dimensions,
-          normalize: true,
-        });
-        const cmd = new InvokeModelCommand({
-          modelId: this.model,
-          contentType: "application/json",
-          accept: "application/json",
-          body: new TextEncoder().encode(body),
-        });
-        const res = await client.send(cmd);
-        const parsed = JSON.parse(new TextDecoder().decode(res.body));
-        if (!parsed.embedding) throw new Error("No embedding in response");
-        return parsed.embedding;
-      },
-      10,
-      signal
-    );
-  }
-}
-
-// ─── Ollama ──────────────────────────────────────────────────────────
-
-class OllamaEmbedder implements Embedder {
-  constructor(
-    private url: string,
-    private model: string
-  ) {
-    this.url = url.replace(/\/$/, "");
-  }
-
-  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
-    const res = await fetch(`${this.url}/api/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: this.model, input: truncate(text) }),
-      signal,
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Ollama ${res.status}: ${body.slice(0, 200)}`);
-    }
-    const json = (await res.json()) as { embeddings: number[][] };
-    return json.embeddings[0];
-  }
-
-  async embedBatch(
-    texts: string[],
-    signal?: AbortSignal
-  ): Promise<(number[] | null)[]> {
-    return parallelMap(
-      texts,
-      async (text) => {
-        try {
-          return await this.embed(text, signal);
-        } catch {
-          return null;
-        }
-      },
-      4,
-      signal
-    );
   }
 }
