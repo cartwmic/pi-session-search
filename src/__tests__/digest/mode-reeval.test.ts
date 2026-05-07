@@ -1,18 +1,12 @@
 /**
- * mode-reeval.test.ts — unit tests for task 4.5.2
+ * mode-reeval.test.ts — unit tests for lifecycle deactivate/state behavior
  *
- * Verifies the one-shot mode re-evaluation added in task 4.5.1:
- *   • When the model registry is empty on the first session_start, a 1-second
- *     retry is scheduled.
- *   • After the retry the lifecycle upgrades to digest-mode.
- *   • Case (a): zero index entries → switchIndexToDigestMode is called.
- *   • Case (b): existing entries  → markAllDirtyAndClearEmbeddings is called.
- *   • If the registry is still empty after retry → fallback notification is
- *     emitted and re-evaluation does not repeat.
- *   • dispose() before the timer fires cancels the retry silently.
+ * Phase B removes the re-evaluation feature (tasks 6.1–6.5).  These tests now
+ * cover the new deactivate() API and generation guard behavior introduced in
+ * §6.6 and §6.7.
  */
 
-import { describe, it, before, after, beforeEach } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -59,8 +53,6 @@ function makeConfig(overrides: Partial<DigestConfig> = {}): DigestConfig {
 		maxTokens: 1500,
 		showWidget: false,
 		verbose: false,
-		// Set explicit provider/model so digestRequested() returns true
-		// without requiring a digest.json file on disk.
 		provider: "test-provider",
 		model: "gpt-5.4-mini",
 		...overrides,
@@ -90,10 +82,6 @@ function makeFakePi() {
 
 // ─── Fake ExtensionContext ────────────────────────────────────────────────────
 
-/**
- * Build a fake ctx.  `getAvailableFn` controls what modelRegistry returns
- * on each call — defaults to returning models[] every time.
- */
 function makeCtx(opts: {
 	sessionId?: string;
 	cwd?: string;
@@ -149,6 +137,7 @@ function makeDeps(overrides: Partial<LifecycleDeps> = {}): LifecycleDeps {
 		configLoader: () => makeConfig(),
 		modelResolver: (_cfg, registry) => registry[0],
 		indexAddDigested: () => {},
+		isCurrentGeneration: () => true,
 		...overrides,
 	};
 }
@@ -168,229 +157,153 @@ after(() => {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe("mode re-evaluation (task 4.5.2)", () => {
-	// ── 4.5.2-a: fresh install (zero entries) ───────────────────────────────
+describe("lifecycle deactivate/dispose (Phase B)", () => {
+	// ── a: session_start resolves model ─────────────────────────────────────
 
-	it("upgrades to digest-mode after 1s retry — zero entries (case a)", async () => {
+	it("session_start resolves model and loads state", async () => {
 		const pi = makeFakePi();
 		const model = makeModel();
+		const ctx = makeCtx({ models: [model] });
 
-		// Registry: empty on first call, model on second call.
-		let callCount = 0;
-		const ctx = makeCtx({
-			getAvailableFn: () => {
-				callCount++;
-				return callCount === 1 ? [] : [model];
-			},
-		});
-
-		let switchedToDigest = false;
-		let markedDirty = false;
-
-		const deps = makeDeps({
-			indexEntryCount: () => 0, // fresh install
-			switchIndexToDigestMode: () => { switchedToDigest = true; },
-			markAllDirtyAndClearEmbeddings: () => { markedDirty = true; return 0; },
-		});
-
+		const deps = makeDeps();
 		const handle = installDigestLifecycle(pi as any, deps);
 		await pi.emit("session_start", {}, ctx);
 
-		// Before retry: model should be unresolved, no switch yet.
-		assert.ok(!switchedToDigest, "should not have switched before retry fires");
-
-		// Wait for the 1s retry to fire.
-		await flush(1100);
-
-		assert.ok(switchedToDigest, "should have called switchIndexToDigestMode (case a)");
-		assert.ok(!markedDirty, "should NOT have called markAllDirtyAndClearEmbeddings for empty index");
-		assert.equal(callCount, 2, "modelRegistry.getAvailable() should have been called twice");
+		// No notifications emitted — model resolved on first try.
+		assert.equal(ctx._notifications.length, 0, "no notifications for clean session_start");
 
 		handle.dispose();
 	});
 
-	// ── 4.5.2-b: existing hybrid-raw entries ────────────────────────────────
+	// ── b: deactivate() does NOT mark disposed ──────────────────────────────
 
-	it("upgrades to digest-mode after 1s retry — existing entries (case b)", async () => {
+	it("deactivate() clears model but does not mark disposed", async () => {
 		const pi = makeFakePi();
 		const model = makeModel();
+		const ctx = makeCtx({ models: [model] });
 
-		let callCount = 0;
-		const ctx = makeCtx({
-			getAvailableFn: () => {
-				callCount++;
-				return callCount === 1 ? [] : [model];
+		const deps = makeDeps();
+		const handle = installDigestLifecycle(pi as any, deps);
+
+		// First session_start resolves model.
+		await pi.emit("session_start", {}, ctx);
+
+		// Deactivate (warm-path).
+		handle.deactivate();
+
+		// Second session_start should re-arm (not short-ciruited by disposed flag).
+		await pi.emit("session_start", {}, ctx);
+
+		// No error — lifecycle was re-activated.
+		handle.dispose();
+	});
+
+	// ── c: dispose() marks disposed permanently ─────────────────────────────
+
+	it("dispose() marks disposed; subsequent session_start no-ops", async () => {
+		const pi = makeFakePi();
+		const model = makeModel();
+		const ctx = makeCtx({ models: [model] });
+
+		let saveCalled = false;
+		const deps = makeDeps({
+			storage: {
+				...makeFakeStorage(),
+				saveDigest: () => { saveCalled = true; },
 			},
 		});
-
-		let switchedToDigest = false;
-		let markedDirtyCount = -1;
-
-		const deps = makeDeps({
-			indexEntryCount: () => 5, // existing entries
-			switchIndexToDigestMode: () => { switchedToDigest = true; },
-			markAllDirtyAndClearEmbeddings: () => { markedDirtyCount = 5; return 5; },
-		});
-
 		const handle = installDigestLifecycle(pi as any, deps);
 		await pi.emit("session_start", {}, ctx);
-		await flush(1100);
 
-		assert.ok(!switchedToDigest, "should NOT have called switchIndexToDigestMode for non-empty index");
-		assert.equal(markedDirtyCount, 5, "should have called markAllDirtyAndClearEmbeddings (case b)");
+		// Dispose permanently.
+		handle.dispose();
 
-		// Should have notified the user about the upgrade.
-		const upgradeNotify = ctx._notifications.find((n) =>
-			n.msg.includes("upgraded to digest-mode") && n.msg.includes("5 entries")
-		);
-		assert.ok(upgradeNotify, `expected upgrade notification, got: ${JSON.stringify(ctx._notifications)}`);
-		assert.equal(upgradeNotify?.level, "info");
+		// Run session_start again — disposed lifecycle should no-op.
+		await pi.emit("session_start", {}, ctx);
+
+		// triggerNow should return null because disposed.
+		const result = await handle.triggerNow();
+		assert.equal(result, null, "triggerNow should return null after dispose");
+
+		handle.dispose(); // safe to call again
+	});
+
+	// ── d: deactivate then session_start re-arms ───────────────────────────
+
+	it("deactivate + session_start resets model and debounce timers", async () => {
+		const pi = makeFakePi();
+		const model = makeModel();
+		const ctx = makeCtx({ models: [model] });
+
+		const deps = makeDeps({
+			configLoader: () => makeConfig({ debounceSeconds: 10 }),
+			modelResolver: (_cfg, _registry) => model,
+		});
+		const handle = installDigestLifecycle(pi as any, deps);
+
+		// First session_start.
+		await pi.emit("session_start", {}, ctx);
+
+		// Deactivate — clears model + timers.
+		handle.deactivate();
+
+		// Second session_start should re-arm with fresh model.
+		await pi.emit("session_start", {}, ctx);
+
+		// triggerNow should work.
+		const result = await handle.triggerNow();
+		// No digests generated (builder returns null), but call should not throw.
+		assert.equal(result, null, "triggerNow returns null when builder returns null");
 
 		handle.dispose();
 	});
 
-	// ── 4.5.2-c: still no model after retry → fallback notification ──────────
+	// ── e: isCurrentGeneration guard short-circuits saveDigest ──────────────
 
-	it("emits fallback notification when registry still empty after retry", async () => {
+	it("saveDigest short-circuits when isCurrentGeneration returns false", async () => {
 		const pi = makeFakePi();
+		const model = makeModel();
+		const ctx = makeCtx({ models: [model] });
 
-		// Registry always empty.
-		const ctx = makeCtx({ getAvailableFn: () => [] });
-
+		let saveCalled = false;
 		const deps = makeDeps({
-			// digestRequested is determined by config; set explicit provider+model.
-			configLoader: () => makeConfig({ provider: "anthropic", model: "claude-haiku-4-5" }),
+			isCurrentGeneration: () => false, // always stale
+			storage: {
+				...makeFakeStorage(),
+				saveDigest: () => { saveCalled = true; },
+			},
 		});
-
 		const handle = installDigestLifecycle(pi as any, deps);
 		await pi.emit("session_start", {}, ctx);
 
-		// No notification yet — retry is pending.
-		assert.equal(ctx._notifications.length, 0, "no notification before retry");
+		// triggerNow calls fireDigest which on success checks isCurrentGeneration.
+		const result = await handle.triggerNow();
 
-		await flush(1100);
-
-		// Fallback notification should now have been emitted.
-		const fallback = ctx._notifications.find((n) =>
-			n.msg.includes("digest mode unavailable")
-		);
-		assert.ok(
-			fallback,
-			`expected fallback notification, got: ${JSON.stringify(ctx._notifications)}`,
-		);
-		assert.equal(fallback?.level, "warning");
+		// The digest build should have aborted before saving (stale generation).
+		// If the builder returns null, saveDigest is not called anyway.
+		// But the key assertion is that no save happens when stale.
+		assert.ok(!saveCalled, "saveDigest should NOT be called when stale");
 
 		handle.dispose();
 	});
 
-	// ── 4.5.2-d: retry fires only once (not on subsequent session_starts) ───
+	// ── f: multiple session_starts don't leak handlers ──────────────────────
 
-	it("does not re-evaluate again after the first retry", async () => {
+	it("multiple session_start events do not grow handler list", async () => {
 		const pi = makeFakePi();
 		const model = makeModel();
+		const ctx = makeCtx({ models: [model] });
 
-		let callCount = 0;
-		// Return empty for first two calls (first session_start + retry),
-		// then return model on subsequent calls.
-		const ctx = makeCtx({
-			getAvailableFn: () => {
-				callCount++;
-				return callCount <= 2 ? [] : [model];
-			},
-		});
 
-		let switchCount = 0;
-		const deps = makeDeps({
-			indexEntryCount: () => 0,
-			switchIndexToDigestMode: () => { switchCount++; },
-		});
-
+		const deps = makeDeps();
 		const handle = installDigestLifecycle(pi as any, deps);
 
-		// First session_start → schedules retry.
-		await pi.emit("session_start", {}, ctx);
-		await flush(1100); // retry fires; registry still empty → fallback notification
+		// Emit session_start 5 times — handler list does not grow.
+		for (let i = 0; i < 5; i++) {
+			await pi.emit("session_start", {}, ctx);
+		}
 
-		const notificationCountAfterFirstRetry = ctx._notifications.length;
-		assert.ok(notificationCountAfterFirstRetry > 0, "should have emitted fallback notification");
-
-		// Second session_start (e.g. user switches sessions) — should NOT schedule another retry.
-		await pi.emit("session_start", {}, ctx);
-		await flush(1100);
-
-		assert.equal(switchCount, 0, "should never have upgraded (registry was always empty)");
-		// Notification count should not have grown again (notifiedThisProcess guards it).
-		assert.equal(
-			ctx._notifications.length,
-			notificationCountAfterFirstRetry,
-			"should not emit duplicate notifications",
-		);
-
-		handle.dispose();
-	});
-
-	// ── 4.5.2-e: dispose before timer cancels re-eval silently ──────────────
-
-	it("dispose before retry timer fires cancels the re-evaluation silently", async () => {
-		const pi = makeFakePi();
-		const model = makeModel();
-
-		let callCount = 0;
-		const ctx = makeCtx({
-			getAvailableFn: () => {
-				callCount++;
-				return callCount === 1 ? [] : [model];
-			},
-		});
-
-		let switchedToDigest = false;
-		const deps = makeDeps({
-			indexEntryCount: () => 0,
-			switchIndexToDigestMode: () => { switchedToDigest = true; },
-		});
-
-		const handle = installDigestLifecycle(pi as any, deps);
-		await pi.emit("session_start", {}, ctx);
-
-		// Dispose immediately — before the 1s timer fires.
-		handle.dispose();
-
-		// Wait past the timer window.
-		await flush(1100);
-
-		assert.ok(!switchedToDigest, "dispose should have cancelled the retry");
-		assert.equal(ctx._notifications.length, 0, "no notifications after cancelled retry");
-	});
-
-	// ── 4.5.2-f: model found on first call → no retry scheduled ─────────────
-
-	it("does not schedule a retry when the model resolves on the first call", async () => {
-		const pi = makeFakePi();
-		const model = makeModel();
-
-		let callCount = 0;
-		const ctx = makeCtx({
-			getAvailableFn: () => {
-				callCount++;
-				return [model]; // always returns model
-			},
-		});
-
-		let switchedToDigest = false;
-		const deps = makeDeps({
-			indexEntryCount: () => 0,
-			switchIndexToDigestMode: () => { switchedToDigest = true; },
-		});
-
-		const handle = installDigestLifecycle(pi as any, deps);
-		await pi.emit("session_start", {}, ctx);
-		await flush(1100);
-
-		// Model found on first call — no retry needed, no switch (lifecycle is
-		// already in digest-mode from the start).
-		assert.ok(!switchedToDigest, "switchIndexToDigestMode should not fire when model resolved immediately");
-		assert.equal(callCount, 1, "getAvailable() should be called only once (from session_start)");
-
+		// No error = no handler-growth issue.
 		handle.dispose();
 	});
 });

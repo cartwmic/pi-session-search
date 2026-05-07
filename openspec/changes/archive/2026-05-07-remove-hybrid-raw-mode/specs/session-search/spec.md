@@ -1,8 +1,5 @@
-# session-search Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-digest-driven-indexing. Update Purpose after archive.
-## Requirements
 ### Requirement: session_search tool
 
 The system SHALL register an LLM-callable tool `session_search` taking parameters `{query: string, limit?: number}` (limit clamped to ≤25, default 10).
@@ -119,37 +116,6 @@ Results SHALL be sorted by `startedAt` descending (newest first).
 - **THEN** the handler returns the verdict's `notifyMessage` as the tool result `content`
 - **AND** no listing is performed
 
-### Requirement: session_read tool
-
-The system SHALL register an LLM-callable tool `session_read` taking parameters `{session: string, offset?: number, limit?: number, include_tools?: boolean}` (limit clamped to ≤100, default 50; offset default 0; include_tools default false).
-
-`session` SHALL accept either a session UUID (resolved via the index) or a file path (with `~` expansion). Resolved paths SHALL pass the path traversal guard from `session-indexing`.
-
-The tool SHALL render the conversation as readable markdown including: header (id, started, cwd, total entries, current page), each user message with timestamp, each assistant message with model attribution and tool-call summaries, compaction summaries, branch summaries, and model-change events. When `include_tools=true`, tool result content (truncated to 500 chars per result) is also included.
-
-#### Scenario: Read by UUID
-
-- **WHEN** `session_read(session: "abc-123")` is called
-- **AND** the index contains a session with id `abc-123` at file path `~/.pi/agent/sessions/X.jsonl`
-- **THEN** the tool reads `~/.pi/agent/sessions/X.jsonl` and returns the formatted conversation
-
-#### Scenario: Read by file path
-
-- **WHEN** `session_read(session: "~/.pi/agent/sessions/X.jsonl")` is called
-- **THEN** the tool expands `~` to `$HOME` and reads the file
-
-#### Scenario: Read with pagination
-
-- **WHEN** `session_read(session: "abc", offset: 50, limit: 50)` is called
-- **AND** the session has 200 conversation entries
-- **THEN** the output includes entries 51–100
-- **AND** ends with a hint pointing to `offset=100`
-
-#### Scenario: Disallowed path is rejected
-
-- **WHEN** `session_read(session: "/etc/passwd")` is called
-- **THEN** the tool returns the access-denied message from the path traversal guard
-
 ### Requirement: before_agent_start session primer
 
 The extension SHALL inject a "Recent Sessions" section into the system prompt on `before_agent_start`, listing up to 5 recent sessions for the current project (falling back to global recent if the project filter is empty). The handler is registered ONCE at module load. When `currentVerdict.kind === "misconfigured"` at invocation, the handler SHALL re-check verdict and return early without injecting any primer.
@@ -231,4 +197,3 @@ The overlay SHALL accept a query, run `session_search` with `limit: 25`, and ren
 - **THEN** the misconfigured signal is conveyed by `ctx.ui.notify` (error level)
 - **AND** a `console.error(...)` line is emitted with the same remediation text (the structured-log convention; pi-coding-agent does not expose a dedicated logger in its public API)
 - **AND** the absence of a visible status line is acknowledged as a known limitation of non-TUI deployments
-

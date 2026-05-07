@@ -19,6 +19,7 @@ import { CURSOR_MARKER, truncateToWidth, visibleWidth } from "@mariozechner/pi-t
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { SearchResult } from "../index/session-index.js";
+import type { Verdict } from "../index/mode.js";
 import type { SessionDigest } from "../digest/schema.js";
 import { formatRelativeDate } from "../utils.js";
 
@@ -398,11 +399,16 @@ export class FindSessionOverlayComponent implements Component, Focusable {
  */
 export function registerFindSessionCommand(
   pi: ExtensionAPI,
-  deps: { index: SearchableIndex },
+  deps: { index: SearchableIndex; getCurrentVerdict?: () => Verdict | null },
 ): void {
   pi.registerCommand("find-session", {
     description: "Search sessions by content and switch to a matching session",
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+      const verdict = deps.getCurrentVerdict?.();
+      if (verdict?.kind === "misconfigured") {
+        ctx.ui.notify(verdict.notifyMessage, "error");
+        return;
+      }
       const initialQuery = args.trim();
 
       const sessionPath = await ctx.ui.custom<string | undefined>(

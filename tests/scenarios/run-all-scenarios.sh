@@ -2,6 +2,10 @@
 # Run all available scenario scripts and produce a summary.
 # Each individual scenario is in scripts/run-scenario-s<N>.sh.
 #
+# Flags:
+#   --ci-only           Run only the CI-blocking subset (no live-model scenarios).
+#                       CI release gate for v3.0.0.
+#
 # Concurrency:
 #   SCENARIO_PARALLEL=N   default 1 (sequential).
 #                         Set >1 to run scenarios in parallel.
@@ -17,6 +21,13 @@
 # safe default for haiku; opus may want 2.
 
 set -euo pipefail
+
+# CI-only blocking subset for v3.0.0 release gate.
+# These scenarios do NOT require live model access for their pass conditions.
+# S21 slot is reserved for a future INDEX_VERSION 4→5 migration scenario;
+# the script does not yet exist on disk so it is omitted from CI_ONLY_NAMES
+# until authored. The slot is documented in SCENARIOS.md.
+CI_ONLY_NAMES=("s01" "s02" "s08" "s09" "s19" "s20")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/.test-output/scenarios"
@@ -67,18 +78,46 @@ run_one() {
 	fi
 }
 
+# Parse --ci-only before shifting args.
+CI_ONLY=0
+ARGS=()
+for arg in "$@"; do
+	if [[ "$arg" == "--ci-only" ]]; then
+		CI_ONLY=1
+	else
+		ARGS+=("$arg")
+	fi
+done
+if (( ${#ARGS[@]} > 0 )); then set -- "${ARGS[@]}"; else set --; fi
+
+if (( CI_ONLY )); then
+	echo "CI-only mode: running blocking subset only"
+fi
+
 # Collect scripts. Use bash 3.2-compatible read loop (mapfile is bash 4+,
 # absent on stock macOS bash). Optionally filter by name prefixes via
 # SCENARIO_FILTER (regex applied to the scenario short name).
 SCRIPTS=()
 while IFS= read -r line; do
 	name="$(basename "$line" .sh | sed 's/^run-scenario-//')"
+	# Skip if CI-only and this scenario is not in the CI-only list
+	if (( CI_ONLY )); then
+		is_ci=0
+		for ci_name in "${CI_ONLY_NAMES[@]}"; do
+			if [[ "$name" == "$ci_name" ]]; then is_ci=1; break; fi
+		done
+		if (( ! is_ci )); then continue; fi
+	fi
 	if [[ -n "${SCENARIO_FILTER:-}" ]] && ! echo "$name" | grep -qE "$SCENARIO_FILTER"; then
 		continue
 	fi
 	SCRIPTS+=("$line")
 done < <(ls "$SCRIPT_DIR"/run-scenario-s*.sh 2>/dev/null | sort)
 [[ ${#SCRIPTS[@]} -gt 0 ]] || { echo "No scenarios found in $SCRIPT_DIR"; exit 1; }
+
+if (( CI_ONLY )); then
+	echo "CI scenarios: ${SCRIPTS[*]}"
+fi
 
 PASS=0
 FAIL=0

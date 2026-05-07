@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ParsedSession } from "../parser";
@@ -6,51 +6,134 @@ import { discoverSessionFiles, parseSession, readSessionId } from "../parser";
 import type { Embedder } from "../embedder";
 import type { EmbedderConfig } from "../embedder";
 import { buildContent, toFtsQuery } from "./fts-index";
-import { truncate, slugToProject, buildSummary } from "../utils";
+import { buildRawFtsContent } from "./raw-fts-content";
+import { buildSummary } from "../utils";
 import type { Mode } from "./mode";
 import type { SessionDigest } from "../digest/schema";
 import { loadDigest } from "../digest/storage";
 
 // ─── FTS side-car (for hybrid search) ────────────────────────────────
 
+/** BM25 weight for digest_body column. Digest content ranks higher. */
+export const W_DIGEST = 2.0
+/** BM25 weight for raw_content column. */
+export const W_RAW = 1.0
+
+/** DDL column declaration order — must match bm25() argument order. */
+const FTS_COLUMNS = "digest_body, raw_content, metadata UNINDEXED, id UNINDEXED, name"
+const FTS_DDL = `CREATE VIRTUAL TABLE s USING fts5(${FTS_COLUMNS}, tokenize='porter unicode61')`
+
 class FtsSide {
-  private db: DatabaseSync;
+  private db: DatabaseSync
   constructor(indexDir: string) {
-    this.db = new DatabaseSync(join(indexDir, "hybrid-fts.db"));
-    this.db.exec("PRAGMA busy_timeout = 5000;");
-    this.db.exec(
-      "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(id UNINDEXED, name, content, tokenize='porter unicode61')",
-    );
+    this.db = new DatabaseSync(join(indexDir, "hybrid-fts.db"))
+    this.db.exec("PRAGMA busy_timeout = 5000;")
+    this.ensureFtsSchema()
   }
-  upsert(id: string, name: string, content: string) {
-    this.db.exec("BEGIN");
-    this.db.prepare("DELETE FROM s WHERE id = ?").run(id);
-    this.db.prepare("INSERT INTO s (id, name, content) VALUES (?, ?, ?)").run(id, name, content);
-    this.db.exec("COMMIT");
+
+  /**
+   * Ensure the FTS table has the expected column shape AND tokenizer.
+   *
+   * Validation uses both structural introspection (PRAGMA table_xinfo)
+   * and a behavioral tokenizer probe (insert sentinel, query, assert,
+   * delete).  Matching the full CREATE statement as a DDL string is
+   * rejected as the validation mechanism — this approach is
+   * schema-structural + behavioral, not DDL-string-fragile.
+   *
+   * Expected columns in order: digest_body, raw_content, metadata, id, name.
+   *
+   * If either check fails, recreate the table via DROP+CREATE inside a
+   * transaction (same atomicity as §3.4 Phase 1).
+   */
+  ensureFtsSchema(): void {
+    const expectedColumns = ["digest_body", "raw_content", "metadata", "id", "name"]
+
+    let schemaValid = false
+    let tokenizerValid = false
+
+    try {
+      // Structural check: PRAGMA table_xinfo lists column name + order
+      const columns = this.db
+        .prepare("SELECT name FROM pragma_table_xinfo('s') WHERE name IS NOT NULL")
+        .all() as { name: string }[]
+
+      // Filter to the visible columns (exclude rank, etc. — only named cols)
+      const colNames = columns.map((c) => c.name)
+      // Verify expected columns appear in order as a prefix (FTS5 may add
+      // hidden columns after the declared ones)
+      schemaValid =
+        expectedColumns.every((name) => colNames.includes(name)) &&
+        colNames.indexOf("digest_body") === 0 &&
+        colNames.indexOf("raw_content") === 1 &&
+        colNames.indexOf("metadata") === 2 &&
+        colNames.indexOf("id") === 3 &&
+        colNames.indexOf("name") === 4
+
+      // Step 3: Behavioral tokenizer probe
+      // Insert a sentinel row, query tokens, assert match count > 0.
+      // Validates porter + unicode61 without DDL string fragility.
+      if (schemaValid) {
+        const testTokens = ["gpt-5.4-nano", "ENOENT", "0x80000003"]
+        const testContent = testTokens.join(" ")
+        const testId = "__schema_validate_tokenizer__"
+        this.db.prepare("DELETE FROM s WHERE id = ?").run(testId)
+        this.db
+          .prepare("INSERT INTO s (id, name, digest_body, raw_content) VALUES (?, '', ?, '')")
+          .run(testId, testContent)
+
+        let probeOk = true
+        for (const token of testTokens) {
+          const row = this.db
+            .prepare(`SELECT count(*) AS c FROM s WHERE s MATCH '"${token}"'`)
+            .get() as { c: number }
+          if (!row || row.c === 0) { probeOk = false; break }
+        }
+
+        this.db.prepare("DELETE FROM s WHERE id = ?").run(testId)
+        tokenizerValid = probeOk
+      }
+    } catch {
+      // Recreate below
+    }
+
+    if (schemaValid && tokenizerValid) return
+
+    // Schema or tokenizer mismatch — drop and recreate inside a transaction
+    this.db.exec("BEGIN")
+    this.db.exec("DROP TABLE IF EXISTS s")
+    this.db.exec(FTS_DDL)
+    this.db.exec("COMMIT")
   }
-  delete(id: string) { this.db.prepare("DELETE FROM s WHERE id = ?").run(id); }
-  clear() { this.db.exec("DELETE FROM s"); }
+
+  upsert(id: string, content: { digestBody: string; rawContent: string; name: string }) {
+    this.db.exec("BEGIN")
+    this.db.prepare("DELETE FROM s WHERE id = ?").run(id)
+    this.db.prepare("INSERT INTO s (id, name, digest_body, raw_content) VALUES (?, ?, ?, ?)").run(
+      id, content.name, content.digestBody, content.rawContent,
+    )
+    this.db.exec("COMMIT")
+  }
+  delete(id: string) { this.db.prepare("DELETE FROM s WHERE id = ?").run(id) }
+  clear() { this.db.exec("DELETE FROM s") }
   /** Drop and recreate the FTS5 table — used on index version hard-reset. */
   hardReset() {
-    this.db.exec("DROP TABLE IF EXISTS s");
-    this.db.exec(
-      "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(id UNINDEXED, name, content, tokenize='porter unicode61')",
-    );
+    this.db.exec("DROP TABLE IF EXISTS s")
+    this.db.exec(FTS_DDL)
   }
-  close() { this.db.close(); }
+  close() { this.db.close() }
   count(): number {
-    return (this.db.prepare("SELECT count(*) as c FROM s").get() as any).c;
+    return (this.db.prepare("SELECT count(*) as c FROM s").get() as any).c
   }
   /** Returns id→rank map (rank starts at 1, best first). */
   searchRanks(q: string, limit: number): Map<string, number> {
-    const fts = toFtsQuery(q);
-    const out = new Map<string, number>();
-    if (!fts) return out;
+    const fts = toFtsQuery(q)
+    const out = new Map<string, number>()
+    if (!fts) return out
     const rows = this.db
-      .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s) LIMIT ?")
-      .all(fts, limit) as any[];
-    rows.forEach((r, i) => out.set(String(r.id), i + 1));
-    return out;
+      .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s, ?, ?) LIMIT ?")
+      .all(fts, W_DIGEST, W_RAW, limit) as any[]
+    rows.forEach((r, i) => out.set(String(r.id), i + 1))
+    return out
   }
 }
 
@@ -61,7 +144,7 @@ interface IndexedSession {
   session: ParsedSession;
   /**
    * Per-session digest (task 6.8). Null when the session has no digest yet
-   * (un-digested in digest-mode; always null in hybrid-raw mode).
+   * (un-digested in digest-hybrid; always null in fts-raw mode).
    * `summary` field removed — render code uses buildSummary(session, digest).
    */
   digest: SessionDigest | null;
@@ -78,73 +161,146 @@ interface IndexData {
   /** Embedding dimensionality; 0 = unknown (fresh or reset) */
   vectorDim: number;
   /**
-   * Mode in effect when this index was last persisted. Tracked so that a mode
-   * change between pi sessions (e.g. user adds digest.json so hybrid-raw →
-   * digest-mode) triggers an automatic embedding clear on the next load —
-   * preventing stale raw-content vectors from being cosine-scored against
-   * fresh digest-content vectors. Absent on pre-fix v4 files; treated as the
-   * current mode (no clear).
+   * Mode in effect when this index was last persisted.  Typed as string
+   * (not Mode) to accept legacy on-disk values that are no longer in the
+   * narrowed Mode union.  Migration code checks against LegacyDiskMode literals.
    */
-  lastMode?: Mode;
+  lastMode?: string;
   /** Keyed by session UUID — stable across file moves */
   sessions: Record<string, IndexedSession>;
 }
 
-export const INDEX_VERSION = 4;
+export const INDEX_VERSION = 5;
 
 /**
- * Unconditional v3→v4 (or any-other→v4) migration check.
- *
- * Runs BEFORE the mode-specific index is instantiated, so the migration fires
- * regardless of whether the active mode is fts-raw, hybrid-raw, or digest-mode.
- * Without this, fts-raw mode (which uses FtsSessionIndex and never reads
- * session-index.json) would leave a stale v3 file on disk indefinitely.
- *
- * Idempotent: if the file is absent or already v4, this is a no-op.
+ * Metadata returned by migrateIndexFileIfStale.
+ * Used by Phase B's post-verdict notify resolver.
+ * The notifyMessage field carries a human-readable description of the
+ * migration case (selected by the migration function, not the caller).
+ * The caller (session_start handler) MAY use this field for user-facing
+ * notification, or MAY suppress it and use its own post-verdict messaging.
  */
-export function migrateIndexFileIfStale(
-  indexDir: string,
-  onNotify?: (msg: string, level: "info" | "warning" | "error") => void,
-): boolean {
-  const indexPath = join(indexDir, "session-index.json");
-  if (!existsSync(indexPath)) return false;
+export interface MigrationMetadata {
+  /** Previous version string if a migration actually fired, or undefined */
+  migratedFrom?: string;
+  /** Previous lastMode on disk, if any. Used by post-verdict notify selector. */
+  lastMode?: string;
+  kind: "clean" | "noop" | "phase1-failed";
+  /** True if any file was actually migrated (cleared). */
+  didMigrate: boolean;
+  /** Human-readable description of the migration case for notification. */
+  notifyMessage?: string;
+  /** Error message if kind === "phase1-failed". */
+  phase1Error?: string;
+}
 
-  let parsed: { version?: number };
+/**
+ * Unconditional version migration check (data-plane only).
+ *
+ * Performs ONLY the data-plane: file wipes, FTS rebuild, JSON write.
+ * Does NOT emit user notifications — those are selected AFTER verdict
+ * resolution by the extension's session_start handler (Phase B task 2.4a).
+ *
+ * Returns MigrationMetadata describing what happened.
+ * Runs BEFORE the mode-specific index is instantiated, so the migration fires
+ * regardless of the active verdict.
+ *
+ * Idempotent: if the file is absent or already current version, this is a no-op.
+ */
+export function migrateIndexFileIfStale(indexDir: string): MigrationMetadata {
+  const indexPath = join(indexDir, "session-index.json");
+  if (!existsSync(indexPath)) return { kind: "noop", didMigrate: false };
+
+  let parsed: { version?: number; lastMode?: string };
   try {
     parsed = JSON.parse(readFileSync(indexPath, "utf8"));
   } catch {
-    return false; // unreadable file — leave alone, SessionIndex.load() will handle
+    return { kind: "noop", didMigrate: false };
   }
 
-  if (parsed.version === INDEX_VERSION) return false;
+  const version = parsed.version
+  const lastMode = parsed.lastMode
 
-  const oldVersion = parsed.version ?? "unknown";
-  // Hard-reset session-index.json to v4 empty
-  mkdirSync(indexDir, { recursive: true });
-  writeFileSync(
-    indexPath,
-    JSON.stringify({ version: INDEX_VERSION, vectorDim: 0, sessions: {} }, null, 2),
-  );
+  // §3.2: version === 5 → no-op
+  if (version === INDEX_VERSION) return { kind: "noop", didMigrate: false };
 
-  // Wipe both FTS DBs so v3 raw-content rows don't coexist with v4 digest rows
-  for (const dbName of ["sessions-fts.db", "hybrid-fts.db"]) {
-    const dbPath = join(indexDir, dbName);
-    if (!existsSync(dbPath)) continue;
-    try {
-      const db = new DatabaseSync(dbPath);
-      db.exec("DROP TABLE IF EXISTS sessions");
-      db.exec("DROP TABLE IF EXISTS s");
-      db.close();
-    } catch {
-      // best-effort
+  // Classify the migration case and build the notify message
+  let notifyMessage: string
+  if (version === 4 && lastMode === "hybrid-raw") {
+    notifyMessage = "hybrid-raw mode removed; rebuilding"
+  } else if (version === 4 && lastMode === "digest-mode") {
+    notifyMessage = "format upgrade v4→v5; rebuilding"
+  } else if (version === 4 && lastMode === "fts-raw") {
+    notifyMessage = "format upgrade v4→v5"
+  } else if (version === 4 && lastMode === undefined) {
+    notifyMessage = "stale index; rebuilding"
+  } else if (version !== undefined && version < 4) {
+    notifyMessage = "very stale index"
+  } else if (version !== undefined && version > 5) {
+    notifyMessage = "downgrade from newer version"
+  } else {
+    // Fallback: version mismatch with unrecognized combo
+    notifyMessage = "index version mismatch; rebuilding"
+  }
+
+  const oldVersion = String(version ?? "unknown")
+
+  // ── Phase 1: FTS rebuild inside an explicit transaction ───────────
+  // Atomicity guarantee: if this transaction throws (disk-full, SQL
+  // error), the entire block rolls back to the pre-migration state.
+  // The caller will retry on the next session_start. Metadata records
+  // kind: "phase1-failed" with the error so the caller can log it.
+  const ftsPath = join(indexDir, "hybrid-fts.db")
+  try {
+    const db = new DatabaseSync(ftsPath)
+    db.exec("BEGIN")
+    db.exec("DROP TABLE IF EXISTS s")
+    db.exec(`CREATE VIRTUAL TABLE s USING fts5(${FTS_COLUMNS}, tokenize='porter unicode61')`)
+    db.exec("COMMIT")
+    db.close()
+  } catch (err: any) {
+    // Phase 1 failed — transaction auto-rolled back
+    return {
+      migratedFrom: oldVersion,
+      lastMode,
+      kind: "phase1-failed",
+      didMigrate: false,
+      notifyMessage,
+      phase1Error: String(err?.message ?? err),
     }
   }
 
-  onNotify?.(
-    `session-search: index version ${oldVersion} is incompatible; reset to v4. Run /digest:backfill to repopulate.`,
-    "info",
-  );
-  return true;
+  // Wipe sessions-fts.db (owned by FtsSessionIndex) so legacy raw-content
+  // rows don't persist for users who later switch to fts-raw mode.
+  const sessDbPath = join(indexDir, "sessions-fts.db")
+  try {
+    const sessDb = new DatabaseSync(sessDbPath)
+    sessDb.exec("DROP TABLE IF EXISTS sessions")
+    sessDb.close()
+  } catch {
+    // sessions-fts.db may not exist — best-effort
+  }
+
+  // ── Phase 2: Write session-index.json via temp+rename ─────────────
+  // Temp+rename ensures crash-safety: if the write is interrupted, the
+  // original file survives. A partially-written .tmp is ignored on next
+  // start because it doesn't match the expected name.
+  mkdirSync(indexDir, { recursive: true })
+  const newData = JSON.stringify(
+    { version: INDEX_VERSION, vectorDim: 0, sessions: {} },
+    null,
+    2,
+  )
+  writeFileSync(indexPath + ".tmp", newData, "utf8")
+  renameSync(indexPath + ".tmp", indexPath)
+
+  return {
+    migratedFrom: oldVersion,
+    lastMode,
+    kind: "clean",
+    didMigrate: true,
+    notifyMessage,
+  }
 }
 
 // ─── Embedding serialization ─────────────────────────────────────────
@@ -187,6 +343,15 @@ export class SessionIndex {
   private mode: Mode;
 
   /**
+   * AbortController for in-flight embedder calls.
+   * dispose() aborts this controller, cancelling all pending embeds.
+   */
+  private abortController: AbortController = new AbortController();
+
+  /** True after dispose() — subsequent method calls are no-ops. */
+  private disposed: boolean = false;
+
+  /**
    * Mutex: while true, the periodic 5-min sync() returns early without work.
    * Set by backfill; cleared on completion. See task 6.6.
    */
@@ -199,10 +364,24 @@ export class SessionIndex {
     private extraArchiveDirs: string[] = [],
     mode?: Mode,
   ) {
-    this.mode = mode ?? "hybrid-raw";
+    this.mode = mode ?? "fts-raw";
     mkdirSync(indexDir, { recursive: true });
     this.indexPath = join(indexDir, "session-index.json");
     this.fts = new FtsSide(indexDir);
+  }
+
+  /**
+   * Dispose this index instance (task 2.11a).
+   * Aborts in-flight embedder fetches via the AbortController,
+   * closes the FtsSide SQLite handle, and marks the instance terminal.
+   * Called from session_start before constructing a new index during
+   * verdict transitions.
+   */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.abortController.abort();
+    this.fts.close();
   }
 
   /**
@@ -237,15 +416,16 @@ export class SessionIndex {
 
         // Mode-transition detection (task 4.5.1 case b, between-sessions variant).
         // If the previous run persisted in a different mode AND there are entries
-        // with populated embeddings, clear them so digest-mode's invariant holds:
-        // entries with empty embedding == un-digested. Without this, a hybrid-raw
-        // index loaded into digest-mode would happily cosine-score raw-content
-        // vectors against (eventually) digest-content vectors — incomparable spaces.
+        // with populated embeddings, clear them so digest-hybrid's invariant holds:
+        // entries with empty embedding == un-digested. Without this, a legacy
+        // hybrid-raw index loaded into digest-hybrid would happily cosine-score
+        // raw-content vectors against (eventually) digest-content vectors -
+        // incomparable spaces.
         const previousMode = this.data.lastMode;
         if (
           previousMode !== undefined &&
           previousMode !== this.mode &&
-          this.mode === "digest-mode"
+          this.mode === "digest-hybrid"
         ) {
           let cleared = 0;
           for (const entry of Object.values(this.data.sessions)) {
@@ -335,32 +515,32 @@ export class SessionIndex {
   private populateFtsFromIndex(): void {
     for (const [id, entry] of Object.entries(this.data.sessions)) {
       const s = entry.session;
-      // In digest-mode, prefer digest.body for FTS content (task 6.2 / 6.3).
-      // In hybrid-raw, reconstruct from stripped metadata fields.
-      let content: string;
-      if (this.mode === "digest-mode" && entry.digest) {
-        content = entry.digest.body;
-      } else {
-        const parts: string[] = [];
-        if (s.name) parts.push(s.name);
-        if (s.firstUserMessage) parts.push(s.firstUserMessage);
-        if (s.compactionSummaries?.length) parts.push(s.compactionSummaries.join("\n"));
-        if (s.branchSummaries?.length) parts.push(s.branchSummaries.join("\n"));
-        if (s.filesModified?.length) parts.push(s.filesModified.join(" "));
-        content = parts.join("\n\n");
-      }
-      // Only add to FTS if we have content (skip un-digested in digest-mode)
-      if (content) {
-        this.fts.upsert(id, s.name ?? "", content);
+      // Recovery from on-disk index is intentionally lossy on raw_content:
+      // session payloads have been stripped to metadata fields only and
+      // cannot reconstruct buildRawFtsContent's full input deterministically.
+      // Spec (session-indexing.md, FTS recovery scenario): "populateFtsFromIndex
+      // recovery is intentionally lossy on raw_content; next sync repopulates
+      // it." Prefer a predictable empty-then-repopulate state over a
+      // half-populated heterogeneous one.
+      const digestBody = (this.mode === "digest-hybrid" && entry.digest)
+        ? entry.digest.body
+        : "";
+      const rawContent = "";
+      if (digestBody || rawContent) {
+        this.fts.upsert(id, { digestBody, rawContent, name: s.name ?? "" })
       }
     }
   }
 
-  /** Save index to disk. */
+  /** Save index to disk via temp+rename pattern for crash safety. */
   save(): void {
     // Stamp current mode so a future load can detect mode transitions across pi sessions.
-    this.data.lastMode = this.mode;
-    writeFileSync(this.indexPath, JSON.stringify(this.data), "utf8");
+    // Format upgrades: migration writes omit lastMode (undefined); the next
+    // SessionIndex.save() stamps the correct new value.
+    this.data.lastMode = this.mode === "digest-hybrid" ? "digest-hybrid" : "fts-raw";
+    const data = JSON.stringify(this.data)
+    writeFileSync(this.indexPath + ".tmp", data, "utf8")
+    renameSync(this.indexPath + ".tmp", this.indexPath)
   }
 
   /**
@@ -378,41 +558,17 @@ export class SessionIndex {
 
   /**
    * Switch the operating mode of this index (task 4.5.1).
-   * Used when upgrading from hybrid-raw to digest-mode after mode re-evaluation.
+   * Used when the mode changes between sessions (e.g. legacy hybrid-raw → digest-hybrid).
    */
   setMode(mode: Mode): void {
     this.mode = mode;
   }
 
   /**
-   * Mark all entries dirty for re-embed and clear their embeddings (task 4.5.1).
-   *
-   * Called when upgrading from hybrid-raw → digest-mode. Dirty mark: zeroing
-   * sizeBytes makes sync() treat entries as changed — same mechanism as the
-   * vectorDim mismatch path (task 5.9). Clearing the embedding field ensures
-   * the search-filter invariant from task 6.11 holds during the transitional
-   * window: entries with an empty embedding are treated as un-digested and
-   * skipped by cosine scoring. Never silently mix raw-content and
-   * digest-content embeddings in the same vector space.
-   *
-   * @returns number of entries marked
-   */
-  markAllDirtyAndClearEmbeddings(): number {
-    let count = 0;
-    for (const entry of Object.values(this.data.sessions)) {
-      entry.sizeBytes = 0; // dirty mark — sync() will re-embed on next run
-      entry.embedding = ""; // cleared — task 6.11 invariant (empty = un-digested)
-      count++;
-    }
-    if (count > 0) this.save();
-    return count;
-  }
-
-  /**
    * Sync: discover sessions, parse new/changed ones, handle moves, remove
    * sessions whose files no longer exist anywhere.
    *
-   * In digest-mode (task 6.3): ALL discovered sessions are included in
+   * In digest-hybrid mode (task 6.3): ALL discovered sessions are included in
    * metadata so session_list works pre-backfill. Sessions with no digest
    * are listable but not searchable (embedding + FTS content left empty).
    */
@@ -539,8 +695,8 @@ export class SessionIndex {
       for (const item of batch) {
         const session = parseSession(item.file, item.archived);
         if (session && session.userMessageCount > 0) {
-          // Task 6.3: in digest-mode, load digest (may be null for un-digested)
-          const digest = this.mode === "digest-mode" ? loadDigest(item.id) : null;
+          // Task 6.3: in digest-hybrid mode, load digest (may be null for un-digested)
+          const digest = this.mode === "digest-hybrid" ? loadDigest(item.id) : null;
           parsed.push({ item, session, digest });
         } else if (session) {
           // Session parsed (valid header) but has no user messages —
@@ -568,8 +724,8 @@ export class SessionIndex {
         continue;
       }
 
-      if (this.mode === "digest-mode") {
-        // Task 6.3: digest-mode — include ALL sessions in metadata, but only
+      if (this.mode === "digest-hybrid") {
+        // Task 6.3: digest-hybrid — include ALL sessions in metadata, but only
         // embed + index FTS for sessions that have a digest.
         for (const { item, session, digest } of parsed) {
           const isUpdate = !!this.data.sessions[item.id];
@@ -577,7 +733,7 @@ export class SessionIndex {
           if (digest) {
             // Has digest — embed and add to FTS
             try {
-              const embedding = await this.embedder.embed(buildEmbeddingText(session, this.mode, digest));
+              const embedding = await this.embedder.embed(digest.body, this.abortController.signal);
 
               if (this.data.vectorDim === 0 && embedding.length > 0) {
                 this.data.vectorDim = embedding.length;
@@ -590,7 +746,7 @@ export class SessionIndex {
                 mtimeMs: item.mtimeMs,
                 sizeBytes: item.sizeBytes,
               };
-              this.fts.upsert(item.id, session.name ?? "", buildContent(session, this.mode, digest));
+              this.fts.upsert(item.id, { digestBody: digest.body, rawContent: buildRawFtsContent(session), name: session.name ?? "" })
             } catch (err: any) {
               onProgress?.(`Embedding failed for ${item.id}: ${err.message}`);
               // Still record in metadata, just without embedding
@@ -618,11 +774,12 @@ export class SessionIndex {
           else added++;
         }
       } else {
-        // hybrid-raw mode: batch embed the raw content
-        const texts = parsed.map(({ session }) => buildEmbeddingText(session, this.mode, null));
+        // fts-raw mode: legacy raw-content path (SessionIndex always digest-hybrid;
+        // this branch is dead code kept for compilation)
+        const texts = parsed.map(({ session }) => session.userMessages?.join("\n") ?? "");
 
         try {
-          const embeddings = await this.embedder.embedBatch(texts);
+          const embeddings = await this.embedder.embedBatch(texts, this.abortController.signal);
 
           for (let j = 0; j < parsed.length; j++) {
             const { item, session } = parsed[j];
@@ -643,7 +800,7 @@ export class SessionIndex {
               mtimeMs: item.mtimeMs,
               sizeBytes: item.sizeBytes,
             };
-            this.fts.upsert(item.id, session.name ?? "", buildContent(session, this.mode, null));
+            this.fts.upsert(item.id, { digestBody: "", rawContent: buildContent(session), name: session.name ?? "" })
 
             if (isUpdate) updated++;
             else added++;
@@ -671,7 +828,7 @@ export class SessionIndex {
 
   /**
    * Add/update a session using its digest (task 6.4).
-   * digest-mode and hybrid-raw only — FtsSessionIndex does not receive this.
+   * digest-hybrid only — FtsSessionIndex does not receive this.
    *
    * @param sessionId   UUID of the session
    * @param session     Full ParsedSession (heavy fields used for embed text)
@@ -684,8 +841,8 @@ export class SessionIndex {
     digest: SessionDigest,
     opts?: { batched?: boolean },
   ): Promise<void> {
-    const embeddingText = buildEmbeddingText(session, this.mode, digest);
-    const embedding = await this.embedder.embed(embeddingText);
+    const embeddingText = digest.body;
+    const embedding = await this.embedder.embed(embeddingText, this.abortController.signal);
 
     if (this.data.vectorDim === 0 && embedding.length > 0) {
       this.data.vectorDim = embedding.length;
@@ -700,8 +857,7 @@ export class SessionIndex {
       sizeBytes: existing?.sizeBytes,
     };
 
-    const ftsContent = buildContent(session, this.mode, digest);
-    this.fts.upsert(sessionId, session.name ?? "", ftsContent);
+    this.fts.upsert(sessionId, { digestBody: digest.body, rawContent: buildRawFtsContent(session), name: session.name ?? "" })
 
     if (!opts?.batched) {
       this.save();
@@ -710,9 +866,9 @@ export class SessionIndex {
 
   /**
    * Get the stored digest for a session (task 6.7).
-   * Returns null if not present or not in digest-mode.
+   * Returns null if not present or not in digest-hybrid mode.
    * FtsSessionIndex does not implement this — the mode router never reaches
-   * FtsSessionIndex in digest-mode.
+   * FtsSessionIndex in digest-hybrid.
    */
   getDigest(sessionId: string): SessionDigest | null {
     return this.data.sessions[sessionId]?.digest ?? null;
@@ -722,7 +878,7 @@ export class SessionIndex {
    * Hybrid search: cosine embeddings + FTS5 BM25, fused via Reciprocal Rank
    * Fusion (k=60). Falls back to pure semantic if FTS side-car is empty.
    *
-   * Task 6.11: in digest-mode, filter out entries with empty embedding BEFORE
+   * Task 6.11: in digest-hybrid, filter out entries with empty embedding BEFORE
    * cosine scoring. Also filters FTS rows with empty content.
    */
   async search(
@@ -733,8 +889,8 @@ export class SessionIndex {
     let entries = Object.entries(this.data.sessions);
     if (entries.length === 0) return [];
 
-    // Task 6.11: in digest-mode, exclude un-digested entries from cosine scoring
-    if (this.mode === "digest-mode") {
+    // Task 6.11: in digest-hybrid, exclude un-digested entries from cosine scoring
+    if (this.mode === "digest-hybrid") {
       entries = entries.filter(([, entry]) => {
         const emb = entry.embedding;
         if (Array.isArray(emb)) return emb.length > 0;
@@ -744,7 +900,7 @@ export class SessionIndex {
 
     if (entries.length === 0) return [];
 
-    const queryEmbedding = await this.embedder.embed(query);
+    const queryEmbedding = await this.embedder.embed(query, this.abortController.signal);
     if (signal?.aborted) return [];
 
     // Rank by cosine similarity
@@ -889,55 +1045,4 @@ function cosineSimilarity(a: number[], b: number[]): number {
   }
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
   return denom === 0 ? 0 : dot / denom;
-}
-
-/**
- * Build text for embedding — mode-aware (task 6.1).
- *
- * digest-mode + digest present → return digest.body (semantic precision).
- * hybrid-raw (or digest-mode with no digest) → byte-identical to upstream.
- *
- * Regression-pin: mode === "hybrid-raw" MUST produce the same output as
- * the old single-arg buildEmbeddingText(session) for the same ParsedSession.
- */
-export function buildEmbeddingText(s: ParsedSession, mode: Mode, digest?: SessionDigest | null): string {
-  if (mode === "digest-mode" && digest) return digest.body;
-
-  // hybrid-raw (or digest-mode without a digest): upstream raw-content concat
-  const parts: string[] = [];
-
-  if (s.name) parts.push(s.name);
-
-  // User messages are the strongest signal
-  const userText = s.userMessages.join("\n").slice(0, 6000);
-  parts.push(userText);
-
-  // Assistant text captures analysis, conclusions, and discoveries
-  if (s.assistantText) {
-    const assistantBudget = 3000;
-    const truncatedAssistant = s.assistantText.slice(0, assistantBudget);
-    parts.push(`Assistant:\n${truncatedAssistant}`);
-  }
-
-  // Compaction summaries are great condensed representations
-  if (s.compactionSummaries.length > 0) {
-    parts.push(s.compactionSummaries.join("\n").slice(0, 4000));
-  }
-
-  // Branch summaries
-  if (s.branchSummaries.length > 0) {
-    parts.push(s.branchSummaries.join("\n").slice(0, 2000));
-  }
-
-  // Project context
-  parts.push(`Project: ${slugToProject(s.projectSlug)}`);
-  parts.push(`CWD: ${s.cwd}`);
-
-  // Files modified give strong project context
-  if (s.filesModified.length > 0) {
-    parts.push(`Files modified: ${s.filesModified.join(", ")}`);
-  }
-
-  // Limit total embedding text
-  return parts.join("\n\n").slice(0, 16000);
 }

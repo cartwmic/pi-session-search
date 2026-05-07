@@ -15,10 +15,6 @@
  * timeout the call is treated as a failure (4.7).
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { sessionSearchHome } from "../utils";
-
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Model, Api } from "@mariozechner/pi-ai";
 
@@ -29,13 +25,6 @@ import { emptyBuilderState } from "./builder";
 import type { BuilderStateOnDisk } from "./storage";
 import type { ConversationView } from "./conversation-view";
 import { liveConversationView } from "./conversation-view";
-import { AUTO_DETECT_MODELS } from "./model-resolver";
-
-// ─── Module-scoped notification flag ────────────────────────────────────────
-//
-// Prevents repeated "digest mode unavailable" notifications across session
-// switches within the same process load.  Resets when the module is re-loaded
-// (extension reload).
 
 // ─── Deps interface ──────────────────────────────────────────────────────────
 
@@ -86,49 +75,46 @@ export interface LifecycleDeps {
 		opts?: { batched: boolean },
 	) => void;
 
-	// ── Task 4.5.1 — mode re-evaluation deps (all optional) ─────────────────
+	/**
+	 * Returns true if the current generation is still active.
+	 * Used to short-circuit async tails (debounce timer, post-LLM saveDigest,
+	 * setSessionName, indexAddDigested) after a verdict transition or
+	 * deactivation.
+	 */
+	/**
+	 * Generation-token guard (task 6.7). When provided, post-LLM disk/UI
+	 * mutations short-circuit if this returns false (a newer session_start
+	 * has overtaken the deferred work). Optional for tests; the warm path
+	 * always supplies one.
+	 */
+	isCurrentGeneration?: () => boolean;
 
 	/**
-	 * Returns the number of entries currently held by the active index.
-	 * Used by re-evaluation to distinguish a fresh install (zero entries)
-	 * from an existing hybrid-raw corpus (non-zero entries).
+	 * Called at the top of the lifecycle's session_start handler to capture
+	 * the current bootGeneration.  The extension wires this to increment its
+	 * own lifecycleGen counter so isCurrentGeneration can compare both values.
 	 */
-	indexEntryCount?: () => number;
-
-	/**
-	 * Mark all index entries dirty and clear their embedding fields so that
-	 * the search-filter invariant from task 6.11 holds during the transitional
-	 * window when upgrading hybrid-raw → digest-mode.  Returns the count of
-	 * affected entries.
-	 */
-	markAllDirtyAndClearEmbeddings?: () => number;
-
-	/**
-	 * Switch the active index to digest-mode.  Called only when entry count
-	 * is zero (fresh install path) so no embedding clearing is needed.
-	 */
-	switchIndexToDigestMode?: () => void;
-}
-
-// ─── digestRequested predicate ───────────────────────────────────────────────
-//
-// True iff the user has expressed intent for digest mode:
-//   • a digest.json config file exists (global or project-scoped), OR
-//   • the loaded config has explicit provider+model fields set.
-
-function digestRequested(config: DigestConfig, cwd: string): boolean {
-	const globalFile = join(sessionSearchHome(), "digest.json");
-	const projectFile = join(cwd, ".pi", "session-search", "digest.json");
-
-	if (existsSync(globalFile) || existsSync(projectFile)) return true;
-	if (config.provider !== undefined && config.model !== undefined) return true;
-	return false;
+	onSessionStartCaptureGeneration?: () => void;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export interface LifecycleHandle {
+	/**
+	 * Warm-path teardown. Clears currentModel, debounce timers, pendingCall,
+	 * and aborts any in-flight LLM call. Does NOT mark the handle permanently
+	 * dead - the lifecycle's session_start handler can re-arm on the next
+	 * event.  Used by verdict transitions (valid → misconfigured, valid →
+	 * valid with different config).
+	 */
+	deactivate: () => void;
+
+	/**
+	 * Permanent teardown. Marks the handle as disposed so no future event
+	 * handler runs. Called ONLY from session_shutdown.
+	 */
 	dispose: () => void;
+
 	/**
 	 * Force-trigger a digest now via the lifecycle's coalescing path.
 	 * Returns a promise that resolves with the digest (or null on failure)
@@ -136,7 +122,7 @@ export interface LifecycleHandle {
 	 *
 	 * Use this from /digest:update and /digest:rewrite to avoid the slash
 	 * command racing the auto-digest fired from `agent_end`. Both code paths
-	 * share the same `pendingCall` mutex — the second arrival waits for the
+	 * share the same `pendingCall` mutex - the second arrival waits for the
 	 * first to complete instead of issuing a parallel `complete()` call that
 	 * the LLM provider would silently abort.
 	 *
@@ -188,7 +174,7 @@ export function installDigestLifecycle(
 	let followUpTimer: ReturnType<typeof setTimeout> | null = null;
 
 	/**
-	 * Latest ExtensionContext — captured from event handlers so fire-and-forget
+	 * Latest ExtensionContext - captured from event handlers so fire-and-forget
 	 * async continuations can call ui.notify / sessionManager / etc.
 	 */
 	let currentCtx: ExtensionContext | null = null;
@@ -196,39 +182,12 @@ export function installDigestLifecycle(
 	/** Current merged config (refreshed on session_start). */
 	let config: DigestConfig = deps.configLoader();
 
-	// One-time flag: prevents repeated “digest mode unavailable” notifications
-	// within the same lifecycle instance.  Per-lifecycle (not module-scoped) so
-	// tests can create independent instances without shared state.
-	let notifiedThisProcess = false;
-
-	// ── Task 4.5.1 — mode re-evaluation state ──────────────────────────────
-
-	/**
-	 * Timer handle for the one-shot 1-second re-evaluation.
-	 * Set when the first session_start finds no model but digestRequested.
-	 * Cleared by clearReEvalTimer() or when the timer fires.
-	 */
-	let reEvalTimer: ReturnType<typeof setTimeout> | null = null;
-
-	/**
-	 * True once the re-evaluation attempt has been made (regardless of outcome).
-	 * Prevents scheduling a second retry on subsequent session_start events.
-	 */
-	let reEvalDone = false;
-
 	// ── Helpers ──────────────────────────────────────────────────────────────
 
 	function clearDebounceTimer(): void {
 		if (debounceTimer !== null) {
 			clearTimeout(debounceTimer);
 			debounceTimer = null;
-		}
-	}
-
-	function clearReEvalTimer(): void {
-		if (reEvalTimer !== null) {
-			clearTimeout(reEvalTimer);
-			reEvalTimer = null;
 		}
 	}
 
@@ -297,6 +256,13 @@ export function installDigestLifecycle(
 			// ── 4.6 Success path ──────────────────────────────────────────────
 			const { digest, anchor } = result;
 
+			// Task 6.7: generation guard — short-circuit if stale
+			if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) {
+				// Stale generation; do NOT save digest, setSessionName, or add to index.
+				// The digest content is from an outdated session context.
+				return;
+			}
+
 			deps.storage.saveDigest(id, digest);
 			pi.setSessionName(digest.headline);
 
@@ -322,7 +288,7 @@ export function installDigestLifecycle(
 		}
 
 		// ── 4.8 Coalescing: if dirty, schedule ONE follow-up ─────────────────
-		if (!disposed && state.dirty) {
+		if (!disposed && state.dirty && (!deps.isCurrentGeneration || deps.isCurrentGeneration())) {
 			state.dirty = false;
 			clearFollowUpTimer();
 			followUpTimer = setTimeout(() => {
@@ -350,7 +316,7 @@ export function installDigestLifecycle(
 		const elapsed = now - lastWrite;
 
 		if (elapsed >= debounceMs) {
-			// Enough time since last write — fire immediately.
+			// Enough time since last write - fire immediately.
 			void fireDigest();
 		} else {
 			// Schedule for the remaining debounce window; replace any existing timer.
@@ -384,6 +350,8 @@ export function installDigestLifecycle(
 	pi.on("session_start", (_event, ctx) => {
 		if (disposed) return;
 
+		deps.onSessionStartCaptureGeneration?.();
+
 		currentCtx = ctx;
 		config = deps.configLoader();
 
@@ -404,48 +372,6 @@ export function installDigestLifecycle(
 
 		// Resolve the digest model for this session.
 		currentModel = deps.modelResolver(config, ctx.modelRegistry.getAvailable());
-
-		// ── Task 4.5.1: schedule one-shot mode re-evaluation ─────────────────
-		//
-		// ctx.modelRegistry.getAvailable() may be empty or incomplete during
-		// the first extension-load session_start (the registry populates
-		// asynchronously).  If the user opted in but no model resolved, wait
-		// 1 s then try again.  Only schedule the retry once per lifecycle; the
-		// reEvalDone flag prevents a second attempt on subsequent session_starts.
-		if (currentModel === undefined && digestRequested(config, ctx.cwd)) {
-			if (!reEvalDone && reEvalTimer === null) {
-				// First detection failed — defer notification to reEvaluate().
-				const capturedCtx = ctx;
-				reEvalTimer = setTimeout(() => {
-					reEvalTimer = null;
-					reEvalDone = true;
-					if (!disposed) reEvaluate(capturedCtx);
-				}, 1000);
-				return; // notification deferred to reEvaluate()
-			}
-			// reEvalDone === true: the retry already ran and still found no model;
-			// fall through to the one-time notification block below.
-		}
-
-		// One-time "unavailable" notification when user opted in but no model found
-		// (task 4.2).  Skipped when retry is still pending (handled above).
-		if (currentModel === undefined && !notifiedThisProcess) {
-			if (digestRequested(config, ctx.cwd)) {
-				const cheapModels = ctx.modelRegistry
-					.getAvailable()
-					.filter((m) => typeof m.cost?.input === "number" && m.cost.input < 0.5)
-					.map((m) => m.id)
-					.slice(0, 8)
-					.join(", ");
-				ctx.ui.notify(
-					`session-search: digest mode unavailable — none of [${AUTO_DETECT_MODELS.join(", ")}] are configured` +
-						(cheapModels ? ` (available cheap models: ${cheapModels})` : "") +
-						`. Running in hybrid-raw mode.`,
-					"warning",
-				);
-				notifiedThisProcess = true;
-			}
-		}
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
@@ -460,74 +386,6 @@ export function installDigestLifecycle(
 		triggerImmediate();
 	});
 
-	// ── Task 4.5.1 — mode re-evaluation ─────────────────────────────────────
-
-	/**
-	 * Re-evaluate whether digest-mode is available.
-	 *
-	 * Fires once, ~1 s after the first session_start that found no model.
-	 * By then ctx.modelRegistry.getAvailable() should be fully populated.
-	 *
-	 * Outcomes:
-	 *   model found + zero index entries  → switch index to digest-mode (case a)
-	 *   model found + existing entries    → mark all dirty + clear embeddings (case b)
-	 *   model still not found             → emit fallback notification, stay in current mode
-	 */
-	function reEvaluate(capturedCtx: ExtensionContext): void {
-		if (disposed) return;
-
-		const latestConfig = deps.configLoader();
-		const retryModel = deps.modelResolver(
-			latestConfig,
-			capturedCtx.modelRegistry.getAvailable(),
-		);
-
-		if (retryModel !== undefined) {
-			// Registry has populated — upgrade to digest-mode.
-			currentModel = retryModel;
-			config = latestConfig;
-
-			const entryCount = deps.indexEntryCount?.() ?? 0;
-			if (entryCount === 0) {
-				// (a) Fresh install: no existing raw-content embeddings to clear.
-				// Just switch the index mode so future addDigested calls use
-				// digest.body as the embedding text.
-				deps.switchIndexToDigestMode?.();
-			} else {
-				// (b) Existing hybrid-raw entries: clear embeddings so that the
-				// task-6.11 filter excludes them from cosine scoring until digests
-				// are available.  Never mix raw-content and digest-content vectors.
-				const marked = deps.markAllDirtyAndClearEmbeddings?.() ?? 0;
-				if (marked > 0) {
-					capturedCtx.ui.notify(
-						`session-search: upgraded to digest-mode; ${marked} entries cleared ` +
-							`for re-embed (run /digest:backfill to re-populate).`,
-						"info",
-					);
-				}
-			}
-		} else {
-			// Registry still doesn’t have a matching model — emit the task-4.2
-			// fallback notification and stay in the current mode.  Do not
-			// re-evaluate again this process.
-			if (!notifiedThisProcess) {
-				const cheapModels = capturedCtx.modelRegistry
-					.getAvailable()
-					.filter((m) => typeof m.cost?.input === "number" && m.cost.input < 0.5)
-					.map((m) => m.id)
-					.slice(0, 8)
-					.join(", ");
-				capturedCtx.ui.notify(
-					`session-search: digest mode unavailable — none of [${AUTO_DETECT_MODELS.join(", ")}] are configured` +
-						(cheapModels ? ` (available cheap models: ${cheapModels})` : "") +
-						`. Running in hybrid-raw mode.`,
-					"warning",
-				);
-				notifiedThisProcess = true;
-			}
-		}
-	}
-
 	pi.on("session_shutdown", (_event, _ctx) => {
 		if (disposed) return;
 
@@ -537,23 +395,24 @@ export function installDigestLifecycle(
 			currentAbort = null;
 		}
 
-		// Clear all timers (including the mode re-eval timer).
+		// Clear all timers.
 		clearHardTimeout();
 		clearDebounceTimer();
 		clearFollowUpTimer();
-		clearReEvalTimer();
 
-		// Clear dirty — no further work should be attempted.
+		// Clear dirty - no further work should be attempted.
 		state.dirty = false;
 		state.pendingCall = false;
 	});
 
-	// ── Dispose ───────────────────────────────────────────────────────────────
+	// ── Warm-path deactivate ────────────────────────────────────────────────
+	//
+	// Clears the model, timers, and pendingCall so the lifecycle stops doing
+	// work. Does NOT set disposed=true — a subsequent session_start can re-arm.
+	// Called from the extension on verdict transitions.
 
-	function dispose(): void {
-		if (disposed) return;
-		disposed = true;
-
+	function deactivate(): void {
+		// Abort any in-flight LLM call.
 		if (currentAbort) {
 			currentAbort.abort();
 			currentAbort = null;
@@ -562,17 +421,32 @@ export function installDigestLifecycle(
 		clearHardTimeout();
 		clearDebounceTimer();
 		clearFollowUpTimer();
-		clearReEvalTimer();
 
+		// Clear model so event handlers no-op.
+		currentModel = undefined;
+
+		// Clear pending work.
+		state.pendingCall = false;
 		state.dirty = false;
 	}
 
-	// Expose lastError for debugging (optional — not in the primary contract)
+	// ── Permanent dispose ───────────────────────────────────────────────────
+	//
+	// Marks the handle permanently dead.  Called ONLY from session_shutdown.
+	// Warm-path transitions use deactivate() instead.
+
+	function dispose(): void {
+		if (disposed) return;
+		disposed = true;
+		deactivate();
+	}
+
+	// Expose lastError for debugging (optional - not in the primary contract)
 	/**
 	 * Public entry point for slash commands. Awaits any in-flight digest
 	 * completion before issuing the new trigger; returns the resulting digest
 	 * (or null on failure). The wait avoids /digest:update racing with the
-	 * agent_end auto-trigger — simultaneous `complete()` calls cause the LLM
+	 * agent_end auto-trigger - simultaneous `complete()` calls cause the LLM
 	 * provider to abort one mid-stream, returning a thinking-only response
 	 * that fails JSON extraction.
 	 */
@@ -604,6 +478,7 @@ export function installDigestLifecycle(
 	}
 
 	return {
+		deactivate,
 		dispose,
 		triggerNow,
 		// Expose for testing

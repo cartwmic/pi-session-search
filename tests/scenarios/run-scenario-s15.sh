@@ -81,7 +81,7 @@ echo "==== S15 results ===="
 # the system prompt. With many real sessions in the user's corpus, the auth
 # fixture may not be in the top-5-by-recency window and may not influence the
 # model's response. The reliable signal is that pi-session-search's tools/render
-# code path is operational — verified by the digest-mode "(no digest)" suffix
+# code path is operational — verified by the digest-hybrid "(no digest)" suffix
 # appearing in any session_list call the model makes.
 "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -3000 > "$PANE_LOG" 2>/dev/null || true
 

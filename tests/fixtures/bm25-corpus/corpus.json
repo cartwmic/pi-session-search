@@ -1,0 +1,482 @@
+[
+  {
+    "id": "A-001",
+    "bucket": "A",
+    "query": "authentication refactor",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Implemented authentication refactor using OAuth2.0 with refresh tokens.",
+        "raw_content": "Working on project setup. Installed dependencies.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-002",
+    "bucket": "A",
+    "query": "database migration",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Completed database migration from SQLite to PostgreSQL with zero downtime.",
+        "raw_content": "Setting up development environment.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-003",
+    "bucket": "A",
+    "query": "memory leak",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Fixed critical memory leak in WebSocket connection pool handler.",
+        "raw_content": "Reviewed PR comments and updated tests.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-004",
+    "bucket": "A",
+    "query": "API rate limit",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Implemented API rate limit middleware using token bucket algorithm.",
+        "raw_content": "Updated package.json with new scripts.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-005",
+    "bucket": "A",
+    "query": "TypeScript strict",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Enabled TypeScript strict mode across entire codebase. Fixed 230 type errors.",
+        "raw_content": "Installed ESLint plugins.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-006",
+    "bucket": "A",
+    "query": "Docker compose",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Containerized application using Docker compose with separate web, worker, and db services.",
+        "raw_content": "Updated README with setup instructions.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-007",
+    "bucket": "A",
+    "query": "CSS grid layout",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Redesigned dashboard using CSS grid layout for responsive card layout system.",
+        "raw_content": "Merged dependency updates from dependabot.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-008",
+    "bucket": "A",
+    "query": "JWT token",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Replaced session cookies with JWT token authentication for mobile app support.",
+        "raw_content": "Refactored utility functions into separate module.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-009",
+    "bucket": "A",
+    "query": "WebSocket reconnect",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Implemented automatic WebSocket reconnect with exponential backoff and jitter.",
+        "raw_content": "Added new test fixtures for unit testing.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "A-010",
+    "bucket": "A",
+    "query": "CI pipeline",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Optimized CI pipeline to run parallel test shards across 4 runners, reducing build time 60%.",
+        "raw_content": "Updated changelog and version bump.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-001",
+    "bucket": "B",
+    "query": "ENOENT",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Resolved file not found error by checking path resolution.",
+        "raw_content": "Error: ENOENT: no such file or directory, open /tmp/data/config.json. That is the full trace.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-002",
+    "bucket": "B",
+    "query": "TypeError undefined",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Fixed null-safety for array operations.",
+        "raw_content": "TypeError: Cannot read properties of undefined reading map. Stack trace follows.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-003",
+    "bucket": "B",
+    "query": "npm install",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Updated project dependencies.",
+        "raw_content": "Running npm install... added 1247 packages in 32s. npm ERR code EINTEGRITY.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-004",
+    "bucket": "B",
+    "query": "git merge",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Resolved merge conflicts in lock file.",
+        "raw_content": "Auto-merging src/index.ts. CONFLICT in package-lock.json. git merge --abort recommended.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-005",
+    "bucket": "B",
+    "query": "404 Not Found",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Handled missing user edge case in API route.",
+        "raw_content": "HTTP 404 Not Found: GET /api/v2/users/12345. Resource does not exist in this workspace.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-006",
+    "bucket": "B",
+    "query": "SyntaxError",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Converted CommonJS module to ESM format.",
+        "raw_content": "SyntaxError: Unexpected token 'export'. Module is not an ES module. Use import instead.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-007",
+    "bucket": "B",
+    "query": "localhost 3000",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Started development server for testing.",
+        "raw_content": "Server running on http://localhost:3000. Ready for connections on port 3000.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-008",
+    "bucket": "B",
+    "query": "Permission denied",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Fixed file permission issues in deployment script.",
+        "raw_content": "chmod: /usr/local/bin/script.sh: Permission denied. Run with sudo or check file ownership.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-009",
+    "bucket": "B",
+    "query": "HTTP 500",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Increased connection pool size to handle load spikes.",
+        "raw_content": "HTTP 500 Internal Server Error: database connection pool exhausted after 10 retries.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "B-010",
+    "bucket": "B",
+    "query": "Segmentation fault",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Debugged native module crash in production environment.",
+        "raw_content": "Segmentation fault core dumped. Signal 11 received at address 0x7fff00000000.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-001",
+    "bucket": "C",
+    "query": "rate limit configuration",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Rate limit configuration updated to 100 requests per minute per user.",
+        "raw_content": "Fixed typo in error message.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated project dependencies to latest versions.",
+        "raw_content": "The rate limit configuration needs to be reviewed before deployment.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-002",
+    "bucket": "C",
+    "query": "connection timeout",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Connection timeout occurs after 30 seconds. Increased connection timeout to 60 seconds for slow networks.",
+        "raw_content": "Added logging statements for debugging.",
+        "counts": { "digest_body": 2, "raw_content": 0 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated error handling middleware.",
+        "raw_content": "Connection timeout setting is configured in the environment variables.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-003",
+    "bucket": "C",
+    "query": "error boundary",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Implemented error boundary component for React tree crash recovery.",
+        "raw_content": "The error boundary component logs all caught errors.",
+        "counts": { "digest_body": 1, "raw_content": 1 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Added loading spinner to async views.",
+        "raw_content": "Error boundary example is in the documentation.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-004",
+    "bucket": "C",
+    "query": "node version",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Updated project configuration files.",
+        "raw_content": "Node version 20.12.0 required. Check node version with node --version. Minimum node version is 18.",
+        "counts": { "digest_body": 0, "raw_content": 3 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Bumped minimum required node version to 18 LTS for compatibility.",
+        "raw_content": "Cleaned up unused imports.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-005",
+    "bucket": "C",
+    "query": "bundle size",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Reduced bundle size by implementing code splitting and tree shaking.",
+        "raw_content": "Bundle size reduced from 2MB to 800KB.",
+        "counts": { "digest_body": 1, "raw_content": 1 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Optimized production bundle size using terser plugin.",
+        "raw_content": "Added new feature component.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-006",
+    "bucket": "C",
+    "query": "process.env",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Configured application settings.",
+        "raw_content": "process.env.NODE_ENV must be set. process.env.API_KEY loaded from vault.",
+        "counts": { "digest_body": 0, "raw_content": 2 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated deployment scripts.",
+        "raw_content": "Check process.env before accessing config values.",
+        "counts": { "digest_body": 0, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-007",
+    "bucket": "C",
+    "query": "circular dependency",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Resolved circular dependency between AuthModule and UserModule by introducing interface.",
+        "raw_content": "Refactored service layer.",
+        "counts": { "digest_body": 1, "raw_content": 0 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated README with contribution guidelines.",
+        "raw_content": "Installed new npm packages.",
+        "counts": { "digest_body": 0, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-008",
+    "bucket": "C",
+    "query": "file path",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Organized code structure.",
+        "raw_content": "File path /src/components/Button.tsx not found. Check file path in imports. File path resolution uses absolute paths. File path must be under src directory.",
+        "counts": { "digest_body": 0, "raw_content": 4 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated file path resolution to use project root alias.",
+        "raw_content": "File path configuration updated in tsconfig.",
+        "counts": { "digest_body": 1, "raw_content": 1 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-009",
+    "bucket": "C",
+    "query": "retry logic",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Added retry logic with exponential backoff. Retry logic retries up to 3 times on failure.",
+        "raw_content": "Tested error handling paths.",
+        "counts": { "digest_body": 2, "raw_content": 0 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated documentation for deployment.",
+        "raw_content": "Retry logic must be added. Retry logic is not yet implemented. Need retry logic for robustness.",
+        "counts": { "digest_body": 0, "raw_content": 3 }
+      }
+    ],
+    "expected_winner": "A"
+  },
+  {
+    "id": "C-010",
+    "bucket": "C",
+    "query": "caching strategy",
+    "sessions": [
+      {
+        "id": "A",
+        "digest_body": "Implemented caching strategy using Redis with TTL-based invalidation.",
+        "raw_content": "Caching strategy reviewed in design meeting.",
+        "counts": { "digest_body": 1, "raw_content": 1 }
+      },
+      {
+        "id": "B",
+        "digest_body": "Updated linting rules for consistent code style.",
+        "raw_content": "Added new type definitions.",
+        "counts": { "digest_body": 0, "raw_content": 0 }
+      }
+    ],
+    "expected_winner": "A"
+  }
+]

@@ -20,10 +20,9 @@ The active mode is **auto-detected** from your configuration — no toggle neede
 | Mode | Condition | Search surface |
 |------|-----------|----------------|
 | `fts-raw` | No embedder configured | FTS5 over raw user messages |
-| `hybrid-raw` | Embedder configured, no digest model | Embeddings + FTS5 over raw content (upstream behavior) |
-| `digest-mode` | Embedder + resolvable digest model | Embeddings + FTS5 over `digest.body` (best recall) |
+| `digest-hybrid` | Embedder + resolvable digest model | Cosine over digest-body embeddings + BM25 over (digest body, raw content) |
 
-Mode degrades gracefully: removing the embedder falls back to `fts-raw`; a digest model that can't be resolved falls back to `hybrid-raw` (with a one-time warning if `digest.json` exists).
+**Misconfigured verdict**: if exactly one of embedder / digest model is configured (partial config), the extension enters a misconfigured state with a pinned status error and a remediation notify. Search and digest tools return the remediation message instead of executing. Recovery commands (`/session-embeddings-setup`, `/digest:settings`) remain available in all states.
 
 ## Install
 
@@ -66,7 +65,7 @@ Config is written to `~/.pi/session-search/config.json`:
 
 Any provider that exposes a standard `/v1/embeddings` endpoint works — Together, Fireworks, vLLM, LiteLLM, Anyscale, etc. Set `baseUrl` accordingly.
 
-### Digest model (optional — enables digest-mode)
+### Digest model (optional — enables digest-hybrid mode)
 
 Requires an embedder to be configured first. The digest builder auto-detects a cheap model from your configured providers (priority: `gpt-5.4-nano` → `gpt-5.4-mini` → `claude-haiku-4-5` → `gemini-3-flash-preview`). To override, create `~/.pi/session-search/digest.json`:
 
@@ -149,11 +148,7 @@ Opens a scrollable card overlay. Select a card to switch to that session.
 3. Indexes content into an FTS5 virtual table with Porter stemming
 4. Queries use BM25 ranking
 
-### Hybrid-raw mode (embedder configured)
-
-Everything above, plus an embedding vector per session built from raw content. At query time, cosine similarity and BM25 are fused via **Reciprocal Rank Fusion** (k=60) — same as upstream.
-
-### Digest mode (embedder + digest model)
+### Digest-hybrid mode (embedder + digest model)
 
 The digest builder runs after each agent turn (debounced 60 s) and on session compact:
 
@@ -173,8 +168,9 @@ Session JSONL is dominated by tool output and chain-of-thought scaffolding — l
 
 - Index stored at `~/.pi/session-search/index/`
 - Incremental sync on startup + every 5 minutes
-- Two separate SQLite DBs: `sessions-fts.db` (FTS-only) and `hybrid-fts.db` (embedder mode)
-- `INDEX_VERSION 4` — v3 entries are dropped on load (v3 embeddings were built on raw content; rebuilding against digest bodies gives better recall)
+- Two separate SQLite DBs: `sessions-fts.db` (FTS-only) and `hybrid-fts.db` (embedder + digest mode)
+- `INDEX_VERSION 5` — FTS5 schema uses two indexed columns (`digest_body`, `raw_content`). BM25 ranking uses calibrated weights (W_DIGEST=2.0, W_RAW=1.0) so digest-body matches rank higher than raw-content matches.
+- **Headless deployment caveat**: misconfigured notify also emits to `console.error` since there is no TUI for `ctx.ui.notify`.
 
 ## Storage layout
 

@@ -3,7 +3,7 @@
 #
 # Goal: With an empty ~/.pi/session-search/ (no config.json, no digest.json),
 # the extension starts in fts-raw mode. No embedder or digest error notifications
-# appear. The session index is written with version=4 and vectorDim=0.
+# appear. The session index is written with version=5 and vectorDim=0.
 
 set -euo pipefail
 source "$(dirname "$0")/scenario-lib.sh"
@@ -58,8 +58,8 @@ if scn_wait_for_file "$INDEX_FILE" 10; then
     scn_pass "S01: session-index.json created"
     scn_assert_file_contains "$INDEX_FILE" '"version"' \
         "S01: index has version field"
-    scn_assert_file_contains "$INDEX_FILE" '"version": *4' \
-        "S01: index version is 4"
+    scn_assert_file_contains "$INDEX_FILE" '"version": *5' \
+        "S01: index version is 5"
     scn_assert_file_contains "$INDEX_FILE" '"vectorDim": *0' \
         "S01: vectorDim is 0 (no embedder in fts-raw mode)"
 else

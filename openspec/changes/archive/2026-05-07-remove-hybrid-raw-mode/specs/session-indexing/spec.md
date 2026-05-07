@@ -1,8 +1,5 @@
-# session-indexing Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-digest-driven-indexing. Update Purpose after archive.
-## Requirements
 ### Requirement: Mode auto-detection
 
 The indexing layer SHALL operate in one of two modes, selected automatically based on configuration. There is no user-facing mode toggle. Partial configuration (exactly one of embedder OR digest model present, OR both broken) SHALL produce a misconfigured verdict that gates the bodies of search/digest commands and tools, NOT a graceful demotion to a different mode.
@@ -243,56 +240,6 @@ The `session-index.json` v5 schema SHALL include a top-level `vectorDim: number`
 - **AND** `~/.pi/session-search/index/hybrid-fts.db` is not created or modified
 - **AND** `~/.pi/session-search/index/session-index.json` is not created or modified
 
-### Requirement: Sync semantics
-
-The `sync()` method SHALL be incremental: discover all session JSONL files, identify by session UUID (read from JSONL header), and classify each into one of: unchanged, new, content-changed, moved, removed.
-
-Change detection SHALL use file `sizeBytes` (not mtime) as the primary signal. A session is considered content-changed only if `sizeBytes` differs from the indexed value. A path change with unchanged size SHALL be classified as moved (metadata-only update, no re-parse).
-
-The startup `sync()` SHALL be fire-and-forget with a 600s timeout. The periodic `sync()` SHALL run every 5 minutes via `setInterval`.
-
-In `digest-hybrid` mode, content-changed sessions SHALL re-embed from the existing digest body (if any) and re-write both FTS columns (digest_body unchanged from current digest, raw_content recomputed from the new file content). Sessions without a digest are tracked but excluded from cosine ranking.
-
-In `fts-raw` mode, content-changed sessions SHALL re-write the single FTS column from raw content. No embedding work occurs in `fts-raw`.
-
-Sessions whose `parseSession` succeeds with `userMessageCount === 0` SHALL be persisted as metadata-only entries (no embedding, no FTS row) so that subsequent syncs do not retry them.
-
-#### Scenario: Unchanged session is skipped
-
-- **WHEN** an indexed session's file has the same `sizeBytes` and same path as last sync
-- **THEN** sync skips it (no re-parse, no re-embed, no digest update)
-
-#### Scenario: Content-changed session is re-ingested in digest-hybrid mode
-
-- **WHEN** an indexed session's file has a different `sizeBytes` than last sync
-- **AND** mode is `digest-hybrid`
-- **THEN** sync re-parses the file, re-embeds the existing `digest.body` if present, and re-writes both `digest_body` and `raw_content` FTS columns
-
-#### Scenario: Content-changed session is re-ingested in fts-raw mode
-
-- **WHEN** an indexed session's file has a different `sizeBytes` than last sync
-- **AND** mode is `fts-raw`
-- **THEN** sync re-parses the file and re-writes the single raw-content FTS column
-- **AND** no embedding work occurs
-
-#### Scenario: Moved session keeps embedding
-
-- **WHEN** a session moves from `~/.pi/agent/sessions/X.jsonl` to `~/.pi/agent/sessions-archive/X.jsonl` with no size change
-- **THEN** sync updates the indexed `file` and `archived` fields
-- **AND** the embedding and digest are preserved
-
-#### Scenario: Removed session is dropped
-
-- **WHEN** an indexed session UUID is no longer present in any discovered JSONL file
-- **THEN** sync removes it from `session-index.json`, `hybrid-fts.db`, and `sessions-fts.db`
-- **AND** the on-disk digest file at `~/.pi/session-search/digests/<uuid>.json` is preserved
-
-#### Scenario: Zero-user-message session is persisted as metadata-only
-
-- **WHEN** sync encounters a JSONL file whose `parseSession()` returns a `ParsedSession` with `userMessageCount === 0`
-- **THEN** the session is persisted to the index as a metadata-only entry (no embedding, no FTS row)
-- **AND** subsequent syncs see matching `sizeBytes` and skip the session
-
 ### Requirement: INDEX_VERSION 4 migration
 
 The system SHALL bump `INDEX_VERSION` from `4` to `5`. On load, `migrateIndexFileIfStale` SHALL detect five migration cases. ANY `version !== 5` triggers a wipe (the FTS schema changed across the board); `lastMode` discriminates only the user-facing notify text.
@@ -412,70 +359,52 @@ This self-heals interrupted migrations AND manual schema drift (file copy from a
 - **THEN** the existing digest is reused (no LLM call)
 - **AND** the indexer embeds and FTS-indexes the existing `digest.body` AND writes raw content to the new column
 
-### Requirement: Vector dimension stability
+### Requirement: Sync semantics
 
-The `session-index.json` SHALL track `vectorDim: number` at the root. On load:
+The `sync()` method SHALL be incremental: discover all session JSONL files, identify by session UUID (read from JSONL header), and classify each into one of: unchanged, new, content-changed, moved, removed.
 
-1. Read current effective embedding dimension from the embedder config (or set `vectorDim: 0` initial sentinel if no embeddings have been written yet).
-2. If `data.vectorDim !== 0 && data.vectorDim !== effectiveDim`, the index is dirty: all stored embeddings are stale.
-3. Mark all sessions for re-embed; emit `ctx.ui.notify("session-search: embedding dimension changed; re-embedding all sessions.", "info")`.
-4. The next `sync()` re-embeds against the current dimension, then updates `vectorDim` in the file.
+Change detection SHALL use file `sizeBytes` (not mtime) as the primary signal. A session is considered content-changed only if `sizeBytes` differs from the indexed value. A path change with unchanged size SHALL be classified as moved (metadata-only update, no re-parse).
 
-The `cosineSimilarity(a, b)` function SHALL throw if `a.length !== b.length`. Mixed-dimension comparisons MUST never silently produce wrong scores.
+The startup `sync()` SHALL be fire-and-forget with a 600s timeout. The periodic `sync()` SHALL run every 5 minutes via `setInterval`.
 
-#### Scenario: Matching dimension load is idempotent
+In `digest-hybrid` mode, content-changed sessions SHALL re-embed from the existing digest body (if any) and re-write both FTS columns (digest_body unchanged from current digest, raw_content recomputed from the new file content). Sessions without a digest are tracked but excluded from cosine ranking.
 
-- **WHEN** `session-index.json` has `vectorDim: 1536` AND embedder config resolves to `dimensions: 1536`
-- **THEN** load proceeds without re-embedding
+In `fts-raw` mode, content-changed sessions SHALL re-write the single FTS column from raw content. No embedding work occurs in `fts-raw`.
 
-#### Scenario: Mismatched dimension triggers re-embed
+Sessions whose `parseSession` succeeds with `userMessageCount === 0` SHALL be persisted as metadata-only entries (no embedding, no FTS row) so that subsequent syncs do not retry them.
 
-- **WHEN** `session-index.json` has `vectorDim: 1536` AND embedder config resolves to `dimensions: 512`
-- **THEN** all sessions are marked dirty
-- **AND** the user is notified
-- **AND** the next `sync()` re-embeds and updates `vectorDim` to `512`
+#### Scenario: Unchanged session is skipped
 
-#### Scenario: Mixed-dimension cosine throws
+- **WHEN** an indexed session's file has the same `sizeBytes` and same path as last sync
+- **THEN** sync skips it (no re-parse, no re-embed, no digest update)
 
-- **WHEN** `cosineSimilarity([0.1, 0.2, 0.3], [0.1, 0.2])` is called
-- **THEN** the function throws `Error("vector length mismatch")`
+#### Scenario: Content-changed session is re-ingested in digest-hybrid mode
 
-### Requirement: Backfill concurrency control
+- **WHEN** an indexed session's file has a different `sizeBytes` than last sync
+- **AND** mode is `digest-hybrid`
+- **THEN** sync re-parses the file, re-embeds the existing `digest.body` if present, and re-writes both `digest_body` and `raw_content` FTS columns
 
-During `/digest:backfill` execution, the indexes SHALL set `backfillInProgress = true`. The periodic 5-minute `setInterval` `sync()` SHALL check this flag and return immediately without doing work while it is true. `addDigested(..., {batched: true})` SHALL update in-memory state only and defer the `session-index.json` disk write. The backfill loop SHALL call `index.flush()` every 25 successful digests AND on completion to persist the in-memory state.
+#### Scenario: Content-changed session is re-ingested in fts-raw mode
 
-#### Scenario: Periodic sync skipped during backfill
+- **WHEN** an indexed session's file has a different `sizeBytes` than last sync
+- **AND** mode is `fts-raw`
+- **THEN** sync re-parses the file and re-writes the single raw-content FTS column
+- **AND** no embedding work occurs
 
-- **WHEN** `/digest:backfill` is mid-run
-- **AND** the 5-minute periodic sync timer fires
-- **THEN** the periodic sync returns immediately without parsing files or writing to disk
+#### Scenario: Moved session keeps embedding
 
-#### Scenario: Backfill flushes index periodically
+- **WHEN** a session moves from `~/.pi/agent/sessions/X.jsonl` to `~/.pi/agent/sessions-archive/X.jsonl` with no size change
+- **THEN** sync updates the indexed `file` and `archived` fields
+- **AND** the embedding and digest are preserved
 
-- **WHEN** backfill has completed 25 successful digests since the last flush
-- **THEN** `index.flush()` is called
-- **AND** `session-index.json` on disk reflects the in-memory state
+#### Scenario: Removed session is dropped
 
-#### Scenario: Backfill flushes index on completion
+- **WHEN** an indexed session UUID is no longer present in any discovered JSONL file
+- **THEN** sync removes it from `session-index.json`, `hybrid-fts.db`, and `sessions-fts.db`
+- **AND** the on-disk digest file at `~/.pi/session-search/digests/<uuid>.json` is preserved
 
-- **WHEN** backfill completes (whether successful or interrupted)
-- **THEN** `index.flush()` is called once more
-- **AND** `backfillInProgress` is reset to `false`
+#### Scenario: Zero-user-message session is persisted as metadata-only
 
-### Requirement: Path traversal guard
-
-When resolving a session path provided by the LLM via `session_read`, the indexer SHALL validate that the resolved absolute path lies within an allowed root: `~/.pi/agent/sessions/`, `~/.pi/agent/sessions-archive/`, or any directory listed in `extraSessionDirs` / `extraArchiveDirs`.
-
-Paths outside these roots SHALL be rejected with a clear error message.
-
-#### Scenario: Allowed path is read
-
-- **WHEN** `session_read` is called with `~/.pi/agent/sessions/--Users-x--/2026-04-29.jsonl`
-- **THEN** the file is read
-
-#### Scenario: Disallowed path is rejected
-
-- **WHEN** `session_read` is called with `/etc/passwd`
-- **THEN** the call returns "Access denied: path is outside the allowed session directories"
-- **AND** no file read is attempted
-
+- **WHEN** sync encounters a JSONL file whose `parseSession()` returns a `ParsedSession` with `userMessageCount === 0`
+- **THEN** the session is persisted to the index as a metadata-only entry (no embedding, no FTS row)
+- **AND** subsequent syncs see matching `sizeBytes` and skip the session

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Scenario S13 — session_list in digest-mode: headline for digested session,
+# Scenario S13 — session_list in digest-hybrid: headline for digested session,
 # "(no digest — run /digest:update)" suffix for un-digested session.
 #
 # Goal: Prove that the session_list tool render branch distinguishes between
 # sessions that have a stored digest (shows headline) and sessions that don't
 # (shows truncated first-message + suffix). Regression: if getDigest() is
-# broken or the digest-mode branch is missing, ALL sessions show first-message.
+# broken or the digest-hybrid branch is missing, ALL sessions show first-message.
 #
 # Setup strategy:
 #   - Embedder config present → SessionIndex (not FtsSessionIndex) is created.
@@ -72,7 +72,7 @@ cat > "$SCN_TEMP_HOME/config.json" << EOF
 }
 EOF
 
-# digest.json: auto-detect haiku → resolvedDigestModel set → digest-mode active
+# digest.json: auto-detect haiku → resolvedDigestModel set → digest-hybrid active
 scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-haiku-4-5","debounceSeconds": 0}'
 
 # ─── Start pi ────────────────────────────────────────────────────────────────
@@ -93,10 +93,10 @@ echo "==== S13 results ===="
 # pi-session-search discovers from $HOME/.pi/agent/sessions/ AS WELL AS extraSessionDirs.
 # Real sessions vastly outnumber fixtures, so the model often summarizes by project
 # rather than reading every session — the fixture's specific headline may not appear.
-# The reliable signal is the no-digest-suffix string, which proves the digest-mode
+# The reliable signal is the no-digest-suffix string, which proves the digest-hybrid
 # render branch is active and correctly distinguishing digested vs un-digested sessions.
 scn_assert_pane_contains "no digest" \
-    "S13: no-digest suffix visible (proves digest-mode render branch active)"
+    "S13: no-digest suffix visible (proves digest-hybrid render branch active)"
 
 # Best-effort: was our fixture's headline mentioned anywhere?
 "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG" 2>/dev/null || true

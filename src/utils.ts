@@ -72,7 +72,7 @@ import type { SessionDigest } from "./digest/schema";
  * @param s       Parsed session metadata
  * @param digest  Optional digest:
  *   - SessionDigest  → use digest.headline for name; include digest.body excerpt
- *   - null           → digest-mode but no digest yet; show fallback + notice
+ *   - null           → digest-hybrid but no digest yet; show fallback + notice
  *   - undefined      → raw mode; use existing name/firstUserMessage logic
  */
 export function buildSummary(s: ParsedSession, digest?: SessionDigest | null): string {
@@ -83,7 +83,7 @@ export function buildSummary(s: ParsedSession, digest?: SessionDigest | null): s
     // Has a digest — use headline
     name = digest.headline;
   } else if (digest === null) {
-    // digest-mode but no digest yet — canonical fallback (task 6.9)
+    // digest-hybrid but no digest yet — canonical fallback (task 6.9)
     name = truncate(s.firstUserMessage, 80) + " (no digest \u2014 run /digest:update)";
   } else {
     // undefined = raw mode — existing behavior

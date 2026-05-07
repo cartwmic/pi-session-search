@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Scenario S16 — session_search results in digest-mode include a Topics line.
+# Scenario S16 — session_search results in digest-hybrid include a Topics line.
 #
-# Goal: When session_search returns a result in digest-mode, the rendered output
+# Goal: When session_search returns a result in digest-hybrid, the rendered output
 # must include "Topics: foo, bar" (or equivalent topic listing). Regression: if
-# the digest-mode result branch is missing or topicsLine is never included, the
+# the digest-hybrid result branch is missing or topicsLine is never included, the
 # user sees a raw session summary without topic context.
 #
 # Requires a working embedder so the session is FTS-indexed (buildContent uses
-# digest.body in digest-mode, which contains "baz"). A local Python mock server
+# digest.body in digest-hybrid, which contains "baz"). A local Python mock server
 # returns deterministic embeddings; the actual vectors don't matter — FTS finds
 # "baz" and the RRF fusion surfaces the session.
 
@@ -108,14 +108,14 @@ sleep 2
 
 # ─── Turn: search for "baz" ───────────────────────────────────────────────────
 # FTS finds the session (body contains "baz"). session_search renders the
-# digest-mode result branch which includes "Topics: foo, bar".
+# digest-hybrid result branch which includes "Topics: foo, bar".
 scn_send "search sessions for baz"
 
 echo "==== S16 results ===="
 
 # ── Mechanical: topics line must appear ───────────────────────────────────────
 scn_assert_pane_contains "Topics:" \
-    "S16: Topics: line present in digest-mode search result"
+    "S16: Topics: line present in digest-hybrid search result"
 
 # ── Mechanical: specific topics values ───────────────────────────────────────
 scn_assert_pane_contains "foo" \

@@ -10,9 +10,10 @@ import type { Config } from "./config";
 import type { EmbedderConfig } from "./embedder";
 import { createEmbedder } from "./embedder";
 import { SessionIndex, migrateIndexFileIfStale } from "./index/session-index";
+import type { MigrationMetadata } from "./index/session-index";
 import { FtsSessionIndex } from "./index/fts-index";
-import { detectMode } from "./index/mode";
-import type { Mode } from "./index/mode";
+import { resolveModeVerdict } from "./index/mode";
+import type { Verdict } from "./index/mode";
 
 // ── Digest modules ──────────────────────────────────────────────────────────
 import {
@@ -55,22 +56,21 @@ import { truncate, pathToSlug, formatRelativeDate } from "./utils";
 type AnyIndex = SessionIndex | FtsSessionIndex;
 
 export default function (pi: ExtensionAPI) {
-	// ── Module-level state ────────────────────────────────────────────────────
+	// ── Module-level state (tasks 2.3, 2.6) ─────────────────────────────────
 	let sessionIndex: AnyIndex | null = null;
 	let currentConfig: Config | null = null;
-	let currentMode: Mode = "fts-raw";
-	let currentDigestConfig: DigestConfig = loadDigestConfig(process.cwd());
-	let resolvedDigestModel: Model<Api> | undefined = undefined;
+	let currentVerdict: Verdict | null = null;
+	let bootGeneration = 0;
+let lifecycleGen = 0;
 	let lifecycleHandle: LifecycleHandle | null = null;
-	let currentRollup: CostRollup = emptyRollup();
+	let currentDigestConfig: DigestConfig = loadDigestConfig(process.cwd());
+let currentRollup: CostRollup = emptyRollup();
 	let lastCwd: string = process.cwd();
 	let syncTimer: ReturnType<typeof setInterval> | null = null;
 
 	const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
 	// ── Cost tracker adapter for lifecycle ────────────────────────────────────
-	// The lifecycle's LifecycleCostTracker.record(digest) receives a SessionDigest
-	// (not an AssistantMessage), so we accumulate manually into CostRollup.
 	const lifecycleCostTracker = {
 		record(digest: SessionDigest): void {
 			currentRollup = {
@@ -86,9 +86,6 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// ── indexAddDigested: lifecycle → SessionIndex bridge ─────────────────────
-	// The lifecycle only passes (sessionId, digest, opts) — not the ParsedSession.
-	// We retrieve the ParsedSession from the already-indexed entry, or fall back
-	// to a disk scan for brand-new sessions not yet indexed.
 	function indexAddDigested(
 		sessionId: string,
 		digest: SessionDigest,
@@ -102,7 +99,6 @@ export default function (pi: ExtensionAPI) {
 				.catch(console.error);
 			return;
 		}
-		// Brand-new session: find file by scanning (rare O(n) path).
 		const files = discoverSessionFiles(
 			currentConfig?.extraSessionDirs ?? [],
 			currentConfig?.extraArchiveDirs ?? [],
@@ -120,33 +116,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// ── Install lifecycle FIRST so its session_start fires before ours ────────
-	// The lifecycle registers its own event handlers; installing it here ensures
-	// those handlers are called for EVERY session_start (including the first).
-	lifecycleHandle = installDigestLifecycle(pi, {
-		storage: { loadDigest, saveDigest, loadBuilderState, saveBuilderState },
-		builder: { generateDigest },
-		costTracker: lifecycleCostTracker,
-		configLoader: () => loadDigestConfig(lastCwd),
-		modelResolver: resolveModel,
-		indexAddDigested,
-		indexEntryCount: () => sessionIndex?.size() ?? 0,
-		markAllDirtyAndClearEmbeddings: () => {
-			if (sessionIndex instanceof SessionIndex) {
-				return sessionIndex.markAllDirtyAndClearEmbeddings();
-			}
-			return 0;
-		},
-		switchIndexToDigestMode: () => {
-			if (sessionIndex instanceof SessionIndex) {
-				sessionIndex.setMode("digest-mode");
-				currentMode = "digest-mode";
-			}
-		},
-	});
 
-	// ── Session primer ────────────────────────────────────────────────────────
-
+	// ── Session primer (task 2.9) — no longer uses currentMode ────────────────
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!sessionIndex || sessionIndex.size() === 0) return;
 
@@ -162,7 +133,7 @@ export default function (pi: ExtensionAPI) {
 
 			const lines = sessions.map((s) => {
 				let name: string;
-				if (currentMode === "digest-mode" && sessionIndex instanceof SessionIndex) {
+				if (currentVerdict?.kind === "digest-hybrid" && sessionIndex instanceof SessionIndex) {
 					const digest = sessionIndex.getDigest(s.id);
 					name = digest ? digest.headline : truncate(s.firstUserMessage, 80);
 				} else {
@@ -184,11 +155,14 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ── session_start ─────────────────────────────────────────────────────────
+	// ── session_start (task 2.4 — 10-step procedure) ─────────────────────────
+	// Registered BEFORE lifecycle so verdict resolution runs first (task 2.5).
 
 	pi.on("session_start", async (_event, ctx) => {
+		const myGen = ++bootGeneration;
 		lastCwd = ctx.cwd || process.cwd();
 
+		// Step 1: load config
 		try {
 			currentConfig = loadConfig();
 		} catch (err: unknown) {
@@ -196,135 +170,192 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`session-search: ${msg}`, "warning");
 		}
 
-		// Resolve digest model + mode eagerly so slash commands have it
-		currentDigestConfig = loadDigestConfig(lastCwd);
-		const availableModels = ctx.modelRegistry.getAvailable();
-		resolvedDigestModel = resolveModel(currentDigestConfig, availableModels);
-		currentMode = detectMode(currentConfig, !!resolvedDigestModel);
-
-		void startIndex(currentConfig, ctx);
-	});
-
-	// ── startIndex ────────────────────────────────────────────────────────────
-
-	async function startIndex(config: Config | null, ctx: any): Promise<void> {
+		// Step 2: migration (data-plane only — task 2.4a)
+		let migrationMeta: MigrationMetadata = { kind: "noop", didMigrate: false };
 		try {
-			// Unconditional v3→v4 migration check (task 5.5). Runs in ALL modes —
-			// fts-raw mode would otherwise leave a stale session-index.json on disk.
-			migrateIndexFileIfStale(getIndexDir(), (msg, level) =>
-				ctx.ui.notify(msg, level),
-			);
+			migrationMeta = migrateIndexFileIfStale(getIndexDir());
+		} catch {
+			// migration failures are internal; index construction will handle
+		}
 
-			if (config?.embedder) {
-				const embedder = createEmbedder(config.embedder, (msg, level) =>
-					ctx.ui.notify(msg, level),
-				);
-				if (!embedder) {
-					sessionIndex = new FtsSessionIndex(
-						getIndexDir(),
-						config.extraSessionDirs ?? [],
-						config.extraArchiveDirs ?? [],
-						"fts-raw",
-					);
-					currentMode = "fts-raw";
-					await sessionIndex.load();
-				} else {
-					sessionIndex = new SessionIndex(
-						embedder,
-						getIndexDir(),
-						config.extraSessionDirs,
-						config.extraArchiveDirs,
-						currentMode,
-					);
-					await sessionIndex.load(
-						(msg, level) => ctx.ui.notify(msg, level),
-						config.embedder,
-					);
-				}
+		// Step 3: create embedder (synchronous; legacy-rejection notify fires inside)
+		currentDigestConfig = loadDigestConfig(lastCwd);
+		const embedder = currentConfig?.embedder
+			? createEmbedder(currentConfig.embedder, (msg, level) =>
+					ctx.ui.notify(msg, level as any),
+				)
+			: null;
+
+		// Step 4: resolve verdict (may take ~1000ms for registry-retry path)
+		const verdict = await resolveModeVerdict(currentConfig, () =>
+			ctx.modelRegistry.getAvailable(),
+			{
+				embedderAvailable: embedder !== null,
+				digestConfig: currentDigestConfig,
+				cwd: lastCwd,
+			},
+		);
+
+		// Step 5: generation guard — a newer session_start overtook this one
+		if (myGen !== bootGeneration) return;
+
+		// Step 6: assign verdict
+		currentVerdict = verdict;
+
+		// Step 7: dispose prior index (abort in-flight embedder + close FtsSide)
+		if (sessionIndex) {
+			if (sessionIndex instanceof SessionIndex) {
+				sessionIndex.dispose();
 			} else {
-				sessionIndex = new FtsSessionIndex(
-					getIndexDir(),
-					config?.extraSessionDirs ?? [],
-					config?.extraArchiveDirs ?? [],
-					currentMode,
-				);
-				await sessionIndex.load();
+				sessionIndex.close();
 			}
+			sessionIndex = null;
+		}
 
-			// Fire-and-forget initial sync
-			const SYNC_TIMEOUT_MS = 600_000;
-			Promise.race([
-				sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
-				new Promise<null>((r) => setTimeout(() => r(null), SYNC_TIMEOUT_MS)),
-			])
-				.then((syncResult) => {
-					if (syncResult === null) {
-						ctx.ui.notify(
-							"session-search: sync timed out (index may be stale)",
-							"warning",
+		// Step 8: migration notify resolver (post-verdict — task 2.4a)
+		if (migrationMeta.didMigrate) {
+			ctx.ui.notify(
+				`session-search: index version ${migrationMeta.migratedFrom} is incompatible; reset to v4. Run /digest:backfill to repopulate.`,
+				"info",
+			);
+		}
+
+		// Step 9: misconfigured → setStatus + notify + console.error, return
+		if (verdict.kind === "misconfigured") {
+			ctx.ui.setStatus("session-search", verdict.statusLine);
+			ctx.ui.notify(verdict.notifyMessage, "error");
+			console.error(verdict.notifyMessage);
+			lifecycleHandle?.deactivate();
+			return;
+		}
+
+		// Step 10: construct new index + kick sync with generation guard
+		if (verdict.kind === "digest-hybrid" && embedder) {
+			sessionIndex = new SessionIndex(
+				embedder,
+				getIndexDir(),
+				currentConfig?.extraSessionDirs ?? [],
+				currentConfig?.extraArchiveDirs ?? [],
+				"digest-hybrid",
+			);
+		} else {
+			sessionIndex = new FtsSessionIndex(
+				getIndexDir(),
+				currentConfig?.extraSessionDirs ?? [],
+				currentConfig?.extraArchiveDirs ?? [],
+			);
+		}
+
+		await sessionIndex.load(
+			verdict.kind === "digest-hybrid" // only SessionIndex needs notify for mode transitions
+				? (msg, level) => ctx.ui.notify(msg, level as any)
+				: undefined,
+			currentConfig?.embedder,
+		);
+
+		// Fire-and-forget initial sync with generation guard (task 2.6)
+		const syncGen = bootGeneration;
+		const SYNC_TIMEOUT_MS = 600_000;
+		Promise.race([
+			sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
+			new Promise<null>((r) => setTimeout(() => r(null), SYNC_TIMEOUT_MS)),
+		])
+			.then((syncResult) => {
+				if (syncGen !== bootGeneration) return; // stale — task 2.6
+				if (syncResult === null) {
+					ctx.ui.notify(
+						"session-search: sync timed out (index may be stale)",
+						"warning",
+					);
+					ctx.ui.setStatus("session-search", "");
+				} else {
+					const { added, updated, removed, moved } = syncResult;
+					const changes = added + updated + removed + moved;
+					if (changes > 0) {
+						const parts: string[] = [];
+						if (added) parts.push(`+${added}`);
+						if (updated) parts.push(`~${updated}`);
+						if (removed) parts.push(`-${removed}`);
+						if (moved) parts.push(`↗${moved} moved`);
+						ctx.ui.setStatus(
+							"session-search",
+							`Sessions: ${parts.join(" ")} (${sessionIndex!.size()} total)`,
 						);
-						ctx.ui.setStatus("session-search", "");
+						if (syncGen === bootGeneration) {
+							setTimeout(() => {
+								if (syncGen !== bootGeneration) return; // stale guard
+								ctx.ui.setStatus("session-search", "");
+							}, 5000);
+						}
 					} else {
-						const { added, updated, removed, moved } = syncResult;
-						const changes = added + updated + removed + moved;
-						if (changes > 0) {
-							const parts: string[] = [];
-							if (added) parts.push(`+${added}`);
-							if (updated) parts.push(`~${updated}`);
-							if (removed) parts.push(`-${removed}`);
-							if (moved) parts.push(`↗${moved} moved`);
-							ctx.ui.setStatus(
-								"session-search",
-								`Sessions: ${parts.join(" ")} (${sessionIndex!.size()} total)`,
-							);
-							setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
-						} else {
-							// No changes — ensure any mid-sync "Indexing N sessions..."
-							// status from onProgress is cleared rather than left stuck.
+						if (syncGen === bootGeneration) {
 							ctx.ui.setStatus("session-search", "");
 						}
 					}
-				})
-				.catch((err: unknown) => {
-					const msg = err instanceof Error ? err.message : String(err);
-					ctx.ui.notify(`session-search: initial sync failed: ${msg}`, "warning");
-					ctx.ui.setStatus("session-search", "");
-				});
-
-			// Periodic sync
-			if (syncTimer) clearInterval(syncTimer);
-			syncTimer = setInterval(async () => {
-				if (!sessionIndex) return;
-				try {
-					const result = await sessionIndex.sync();
-					const changes =
-						result.added + result.updated + result.removed + result.moved;
-					if (changes > 0) {
-						const parts: string[] = [];
-						if (result.added) parts.push(`+${result.added}`);
-						if (result.updated) parts.push(`~${result.updated}`);
-						if (result.removed) parts.push(`-${result.removed}`);
-						if (result.moved) parts.push(`↗${result.moved}`);
-						ctx.ui.setStatus(
-							"session-search",
-							`Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`,
-						);
-						setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
-					}
-				} catch {
-					// Silent
 				}
-			}, SYNC_INTERVAL_MS);
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			ctx.ui.notify(`session-search init failed: ${msg}`, "error");
-		}
-	}
+			})
+			.catch((err: unknown) => {
+				if (syncGen !== bootGeneration) return; // stale
+				const msg = err instanceof Error ? err.message : String(err);
+				ctx.ui.notify(`session-search: initial sync failed: ${msg}`, "warning");
+				ctx.ui.setStatus("session-search", "");
+			});
 
-	// ── session_shutdown ──────────────────────────────────────────────────────
+		// Periodic sync with generation guard (task 2.10)
+		if (syncTimer) clearInterval(syncTimer);
+		syncTimer = setInterval(async () => {
+			if (!sessionIndex || currentVerdict?.kind === "misconfigured") return; // task 2.10
 
+			const syncGen = bootGeneration;
+			try {
+				const result = await sessionIndex.sync();
+				if (syncGen !== bootGeneration) return; // stale — task 2.6
+				const changes =
+					result.added + result.updated + result.removed + result.moved;
+				if (changes > 0) {
+					const parts: string[] = [];
+					if (result.added) parts.push(`+${result.added}`);
+					if (result.updated) parts.push(`~${result.updated}`);
+					if (result.removed) parts.push(`-${result.removed}`);
+					if (result.moved) parts.push(`↗${result.moved}`);
+					ctx.ui.setStatus(
+						"session-search",
+						`Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`,
+					);
+					if (syncGen === bootGeneration) {
+						setTimeout(() => {
+							if (syncGen !== bootGeneration) return; // stale guard
+							ctx.ui.setStatus("session-search", "");
+						}, 5000);
+					}
+				}
+			} catch {
+				// Silent
+			}
+		}, SYNC_INTERVAL_MS);
+	});
+
+	// ── Install lifecycle AFTER primary session_start (task 2.5) ────────────
+	// The lifecycle's session_start handler reads currentVerdict from closure
+	// and resolves its own model. Installed after the primary handler so
+	// verdict resolution runs first.
+
+	lifecycleHandle = installDigestLifecycle(pi, {
+		storage: { loadDigest, saveDigest, loadBuilderState, saveBuilderState },
+		builder: { generateDigest },
+		costTracker: lifecycleCostTracker,
+		configLoader: () => loadDigestConfig(lastCwd),
+		modelResolver: resolveModel,
+		indexAddDigested,
+		isCurrentGeneration: () =>
+			currentVerdict?.kind === "digest-hybrid" && lifecycleGen === bootGeneration,
+		onSessionStartCaptureGeneration: () => {
+			lifecycleGen = bootGeneration;
+		},
+	});
+
+	// ── session_shutdown (task 2.11) — calls lifecycleHandle.dispose() ──────
 	pi.on("session_shutdown", async () => {
-		// Dispose lifecycle (aborts in-flight LLM calls, clears timers)
 		lifecycleHandle?.dispose();
 		lifecycleHandle = null;
 
@@ -341,7 +372,7 @@ export default function (pi: ExtensionAPI) {
 	// Slash commands — /digest:*
 	// ──────────────────────────────────────────────────────────────────────────
 
-	// ── 8.1 /digest:settings ─────────────────────────────────────────────────
+	// ── 8.1 /digest:settings (task 2.8 — recovery command, no short-circuit) ──
 	pi.registerCommand("digest:settings", {
 		description:
 			"Create session-digest config at ~/.pi/session-search/digest.json (if absent) and show its path",
@@ -363,17 +394,18 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── 8.2 /digest:update ────────────────────────────────────────────────────
-	// Routes through lifecycle.triggerNow() so it shares the pendingCall mutex
-	// with the auto-trigger fired from agent_end. Avoids two parallel
-	// complete() calls that some providers silently abort mid-stream.
+	// ── 8.2 /digest:update (task 2.7 — check verdict) ───────────────────────
 	pi.registerCommand("digest:update", {
 		description:
 			"Generate/update the digest for the current session immediately (bypasses debounce)",
 		handler: async (_args, ctx) => {
-			if (!resolvedDigestModel) {
+			if (currentVerdict?.kind === "misconfigured") {
+				ctx.ui.notify(currentVerdict.notifyMessage, "error");
+				return;
+			}
+			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
-					"Digest mode unavailable: no digest model resolved. Run /digest:settings to configure.",
+					"Digest mode unavailable: not in digest-hybrid mode. Run /digest:settings to configure.",
 					"warning",
 				);
 				return;
@@ -402,10 +434,18 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── 8.3 /digest:show ─────────────────────────────────────────────────────
+	// ── 8.3 /digest:show (task 2.7 — check verdict) ─────────────────────────
 	pi.registerCommand("digest:show", {
 		description: "Print the current session's digest",
 		handler: async (_args, ctx) => {
+			if (currentVerdict?.kind === "misconfigured") {
+				ctx.ui.notify(currentVerdict.notifyMessage, "error");
+				return;
+			}
+			if (currentVerdict?.kind !== "digest-hybrid") {
+				ctx.ui.notify("No digest available (not in digest-hybrid mode).", "info");
+				return;
+			}
 			const sessionId = ctx.sessionManager.getSessionId();
 			const digest = loadDigest(sessionId);
 			if (!digest) {
@@ -423,14 +463,18 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── 8.4 /digest:rewrite ──────────────────────────────────────────────────
+	// ── 8.4 /digest:rewrite (task 2.7 — check verdict) ──────────────────────
 	pi.registerCommand("digest:rewrite", {
 		description:
 			"Force full re-summarize of the current session digest regardless of token threshold",
 		handler: async (_args, ctx) => {
-			if (!resolvedDigestModel) {
+			if (currentVerdict?.kind === "misconfigured") {
+				ctx.ui.notify(currentVerdict.notifyMessage, "error");
+				return;
+			}
+			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
-					"Digest mode unavailable: no digest model resolved. Run /digest:settings to configure.",
+					"Digest mode unavailable: not in digest-hybrid mode. Run /digest:settings to configure.",
 					"warning",
 				);
 				return;
@@ -456,15 +500,22 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── 8.5 / 8.6 / 8.7 /digest:backfill [--dry-run | --regen] ─────────────
+	// ── 8.5 / 8.6 / 8.7 /digest:backfill [--dry-run | --regen] (task 2.7) ──
+	// Also task 2.6: generation guard for long-running commands.
 	pi.registerCommand("digest:backfill", {
 		description:
 			"Generate digests for un-digested historical sessions. " +
 			"Flags: --dry-run (cost estimate only), --regen (overwrite all existing digests)",
 		handler: async (args, ctx) => {
-			if (!resolvedDigestModel) {
+			const myGen = bootGeneration;
+
+			if (currentVerdict?.kind === "misconfigured") {
+				ctx.ui.notify(currentVerdict.notifyMessage, "error");
+				return;
+			}
+			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
-					"Digest mode unavailable: no digest model resolved. Run /digest:settings to configure.",
+					"Backfill requires digest-hybrid mode. Run /digest:settings to configure.",
 					"warning",
 				);
 				return;
@@ -481,6 +532,13 @@ export default function (pi: ExtensionAPI) {
 				currentConfig?.extraArchiveDirs ?? [],
 			);
 
+			// Resolve digest model for backfill
+			const backfillModel = resolveModel(digestConfig, ctx.modelRegistry.getAvailable());
+			if (!backfillModel) {
+				ctx.ui.notify("No digest model available for backfill. Run /digest:settings to configure.", "error");
+				return;
+			}
+
 			// ── 8.6 Dry run ────────────────────────────────────────────────────
 			if (isDryRun) {
 				const embedderRaw = currentConfig?.embedder as
@@ -489,9 +547,12 @@ export default function (pi: ExtensionAPI) {
 				runBackfillDryRun({
 					files,
 					activeSessionId,
-					resolvedModel: resolvedDigestModel,
+					resolvedModel: backfillModel,
 					embedderPricePerInputToken: embedderRaw?.pricePerInputToken,
-					notify: (msg, level = "info") => ctx.ui.notify(msg, level as any),
+					notify: (msg, level = "info") => {
+						if (myGen !== bootGeneration) return; // task 2.6
+						ctx.ui.notify(msg, level as any);
+					},
 				});
 				return;
 			}
@@ -509,32 +570,44 @@ export default function (pi: ExtensionAPI) {
 				files,
 				activeSessionId,
 				index: sessionIndex,
-				resolvedModel: resolvedDigestModel,
+				resolvedModel: backfillModel,
 				digestConfig,
 				regenMode: isRegen,
-				setStatus: (msg) => ctx.ui.setStatus("session-search", msg ?? ""),
-				notify: (msg, level = "info") => ctx.ui.notify(msg, level as any),
+				setStatus: (msg) => {
+					if (myGen !== bootGeneration) return; // task 2.6
+					ctx.ui.setStatus("session-search", msg ?? "");
+				},
+				notify: (msg, level = "info") => {
+					if (myGen !== bootGeneration) return; // task 2.6
+					ctx.ui.notify(msg, level as any);
+				},
 			});
 		},
 	});
 
-	// ── 8.8 /digest:cost ─────────────────────────────────────────────────────
+	// ── 8.8 /digest:cost (task 2.7 — check verdict) ─────────────────────────
 	pi.registerCommand("digest:cost", {
 		description: "Show cumulative digest generation cost for this process",
 		handler: async (_args, ctx) => {
+			if (currentVerdict?.kind === "misconfigured") {
+				ctx.ui.notify(currentVerdict.notifyMessage, "error");
+				return;
+			}
+			if (currentVerdict?.kind !== "digest-hybrid") {
+				ctx.ui.notify("No digest cost recorded (not in digest-hybrid mode).", "info");
+				return;
+			}
 			if (currentRollup.calls === 0) {
 				ctx.ui.notify("No cost recorded this process.", "info");
 				return;
 			}
-			const modelName = resolvedDigestModel
-				? `${(resolvedDigestModel as any).provider}/${(resolvedDigestModel as any).id}`
-				: "unknown";
-			ctx.ui.notify(formatCost(currentRollup, modelName), "info");
+			ctx.ui.notify(formatCost(currentRollup, "digest"), "info");
 		},
 	});
 
 	// ──────────────────────────────────────────────────────────────────────────
-	// Setup command (8.9) — flat-prompt /session-embeddings-setup
+	// Setup command (8.9) — /session-embeddings-setup
+	// Task 2.8: recovery command — does NOT short-circuit on misconfigured.
 	// ──────────────────────────────────────────────────────────────────────────
 
 	pi.registerCommand("session-embeddings-setup", {
@@ -628,7 +701,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ──────────────────────────────────────────────────────────────────────────
-	// 8.10 /session-sync and /session-reindex — no behavior change
+	// 8.10 /session-sync and /session-reindex (task 2.6 generation guard)
 	// ──────────────────────────────────────────────────────────────────────────
 
 	pi.registerCommand("session-sync", {
@@ -638,10 +711,13 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Session index not ready yet.", "warning");
 				return;
 			}
+			const myGen = bootGeneration;
 			try {
-				const r = await sessionIndex.sync((msg) =>
-					ctx.ui.setStatus("session-search", msg),
-				);
+				const r = await sessionIndex.sync((msg) => {
+					if (myGen !== bootGeneration) return; // task 2.6
+					ctx.ui.setStatus("session-search", msg);
+				});
+				if (myGen !== bootGeneration) return; // task 2.6
 				const parts: string[] = [];
 				if (r.added) parts.push(`+${r.added}`);
 				if (r.updated) parts.push(`~${r.updated}`);
@@ -653,6 +729,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				ctx.ui.setStatus("session-search", "");
 			} catch (err: unknown) {
+				if (myGen !== bootGeneration) return; // task 2.6
 				const msg = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Sync failed: ${msg}`, "error");
 			}
@@ -666,14 +743,18 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Session index not ready yet.", "warning");
 				return;
 			}
+			const myGen = bootGeneration;
 			ctx.ui.notify("Re-indexing sessions…", "info");
 			try {
-				await sessionIndex.rebuild((msg) =>
-					ctx.ui.setStatus("session-search", msg),
-				);
+				await sessionIndex.rebuild((msg) => {
+					if (myGen !== bootGeneration) return; // task 2.6
+					ctx.ui.setStatus("session-search", msg);
+				});
+				if (myGen !== bootGeneration) return; // task 2.6
 				ctx.ui.notify(`Re-indexed: ${sessionIndex.size()} sessions`, "success");
 				ctx.ui.setStatus("session-search", "");
 			} catch (err: unknown) {
+				if (myGen !== bootGeneration) return; // task 2.6
 				const msg = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`Re-index failed: ${msg}`, "error");
 			}
@@ -685,6 +766,7 @@ export default function (pi: ExtensionAPI) {
 	// ──────────────────────────────────────────────────────────────────────────
 
 	registerFindSessionCommand(pi, {
+		getCurrentVerdict: () => currentVerdict,
 		index: {
 			async search(query: string, limit: number) {
 				if (!sessionIndex) return [];
@@ -701,6 +783,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ──────────────────────────────────────────────────────────────────────────
 	// Tools: session_search, session_list, session_read
+	// Task 2.7: check verdict — return notifyMessage if misconfigured
 	// ──────────────────────────────────────────────────────────────────────────
 
 	pi.registerTool({
@@ -723,6 +806,12 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params, signal) {
+			if (currentVerdict?.kind === "misconfigured") {
+				return {
+					content: [{ type: "text", text: currentVerdict.notifyMessage }],
+					details: {},
+				};
+			}
 			if (!sessionIndex || sessionIndex.size() === 0) {
 				if (!sessionIndex) {
 					return {
@@ -731,7 +820,7 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				const msg =
-					currentMode === "digest-mode"
+					currentVerdict?.kind === "digest-hybrid"
 						? "Session index is empty in digest mode. Run /digest:backfill to digest historical sessions, or wait for new sessions to be digested live."
 						: "Session index is empty — it may still be building. Try again in a moment.";
 				return { content: [{ type: "text", text: msg }], details: {} };
@@ -761,7 +850,7 @@ export default function (pi: ExtensionAPI) {
 						const displayFile = r.session.file.replace(home, "~");
 
 						if (
-							currentMode === "digest-mode" &&
+							currentVerdict?.kind === "digest-hybrid" &&
 							sessionIndex instanceof SessionIndex
 						) {
 							const digest = sessionIndex.getDigest(r.session.id);
@@ -834,6 +923,12 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params) {
+			if (currentVerdict?.kind === "misconfigured") {
+				return {
+					content: [{ type: "text", text: currentVerdict.notifyMessage }],
+					details: {},
+				};
+			}
 			if (!sessionIndex || sessionIndex.size() === 0) {
 				const msg = !sessionIndex
 					? "Session index not ready yet."
@@ -861,7 +956,7 @@ export default function (pi: ExtensionAPI) {
 			const output = sessions
 				.map((s, i) => {
 					let name: string;
-					if (currentMode === "digest-mode" && sessionIndex instanceof SessionIndex) {
+					if (currentVerdict?.kind === "digest-hybrid" && sessionIndex instanceof SessionIndex) {
 						const digest = sessionIndex.getDigest(s.id);
 						if (digest) {
 							name = digest.headline;
@@ -923,6 +1018,13 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params) {
+			if (currentVerdict?.kind === "misconfigured") {
+				return {
+					content: [{ type: "text", text: currentVerdict.notifyMessage }],
+					details: {},
+				};
+			}
+
 			let filePath = params.session;
 
 			if (
@@ -992,27 +1094,15 @@ export default function (pi: ExtensionAPI) {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 10.6 Exported helper API
-// ──────────────────────────────────────────────────────────────────────────────
 
-// Utils
 export { truncate, pathToSlug, formatRelativeDate, slugToProject, buildSummary } from "./utils";
-
-// Index helpers
 export { toFtsQuery, buildContent } from "./index/fts-index";
-export { buildEmbeddingText, encodeEmbedding, decodeEmbedding } from "./index/session-index";
+export { encodeEmbedding, decodeEmbedding } from "./index/session-index";
 export type { SearchResult, ListFilters } from "./index/session-index";
-
-// Parser
 export { parseSession, discoverSessionFiles, readSessionId } from "./parser";
-
-// Config
 export { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
-
-// Digest — schema
 export type { SessionDigest } from "./digest/schema";
 export { validateDigest } from "./digest/schema";
-
-// Digest — storage
 export {
 	digestPath,
 	loadDigest,
@@ -1022,23 +1112,15 @@ export {
 	loadBuilderState,
 	saveBuilderState,
 } from "./digest/storage";
-
-// Digest — config
 export {
 	loadDigestConfig,
 	saveDigestConfig,
 	getDigestConfigPath,
 } from "./digest/config";
 export type { DigestConfig } from "./digest/config";
-
-// Digest — model resolver
 export { resolveModel, AUTO_DETECT_MODELS } from "./digest/model-resolver";
-
-// Digest — cost tracker
 export { emptyRollup, record as recordCost, format as formatCost } from "./digest/cost-tracker";
 export type { CostRollup } from "./digest/cost-tracker";
-
-// Digest — builder
 export {
 	generateDigest,
 	estimateTokens,
@@ -1048,21 +1130,13 @@ export {
 	emptyBuilderState,
 } from "./digest/builder";
 export type { BuilderState, GenerateOpts } from "./digest/builder";
-
-// Digest — conversation view
 export {
 	liveConversationView,
 	parsedConversationView,
 } from "./digest/conversation-view";
 export type { ConversationView, ConversationMessage } from "./digest/conversation-view";
-
-// Digest — lifecycle
 export { installDigestLifecycle } from "./digest/lifecycle";
 export type { LifecycleHandle, LifecycleDeps } from "./digest/lifecycle";
-
-// Digest — backfill
 export { runBackfill, runBackfillDryRun } from "./digest/backfill";
-
-// Search overlay
 export { registerFindSessionCommand } from "./search/overlay";
 export type { SearchableIndex } from "./search/overlay";

@@ -5,8 +5,6 @@ import type { ParsedSession } from "../parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "../parser";
 import type { SearchResult, ListFilters } from "./session-index";
 import { truncate, buildSummary } from "../utils";
-import type { Mode } from "./mode";
-import type { SessionDigest } from "../digest/schema";
 
 /**
  * SQLite FTS5-backed session index. API-compatible with SessionIndex.
@@ -23,8 +21,6 @@ export class FtsSessionIndex {
     indexDir: string,
     extraSessionDirs: string[] = [],
     extraArchiveDirs: string[] = [],
-    // TODO(phase 10): wire mode into index
-    _mode?: Mode,
   ) {
     this.indexDir = indexDir;
     this.extraSessionDirs = extraSessionDirs;
@@ -262,18 +258,11 @@ export class FtsSessionIndex {
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /**
- * Build FTS content for a session — mode-aware (task 6.2).
- *
- * digest-mode + digest present → return digest.body.
- * fts-raw / hybrid-raw → byte-identical to upstream raw-content concat.
- *
- * Regression-pin: mode === "fts-raw" (or omitted) MUST produce the same
- * output as the old single-arg buildContent(session) for the same ParsedSession.
+ * Build FTS content for a session.
+ * Returns a concatenation of name, user messages, compaction summaries,
+ * branch summaries, and filesModified — suitable for BM25 keyword search.
  */
-export function buildContent(s: ParsedSession, mode?: Mode, digest?: SessionDigest | null): string {
-  if (mode === "digest-mode" && digest) return digest.body;
-
-  // fts-raw / hybrid-raw: upstream raw-content concat (byte-identical)
+export function buildContent(s: ParsedSession): string {
   const parts: string[] = [];
   if (s.name) parts.push(s.name);
   parts.push(s.userMessages.join("\n"));

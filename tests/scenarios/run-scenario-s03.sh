@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario S03 — digest-mode when embedder + cheap model (haiku) both available.
+# Scenario S03 — digest-hybrid when embedder + cheap model (haiku) both available.
 #
 # Goal: With config.json (embedder) + digest.json (digest requested), the model
 # resolver finds claude-haiku-4-5 from the claude-bridge registry and installs
@@ -21,8 +21,8 @@ trap 'scn_pi_stop' EXIT
 
 scn_setup_clean_home "s03"
 
-# Embedder — fake endpoint; the field merely needs to be present so detectMode
-# returns "digest-mode" (not "fts-raw"). No actual embedding calls fire during
+# Embedder — fake endpoint; the field merely needs to be present so verdict
+# resolves to digest-hybrid (not fts-raw). No actual embedding calls fire during
 # this scenario because the index is empty on a fresh HOME.
 scn_setup_embedder_config '{
   "embedder": {
@@ -53,7 +53,7 @@ scn_assert_pane_not_contains "digest mode unavailable" \
     "S03: no digest-unavailable warning (haiku resolved)"
 
 scn_assert_pane_not_contains "Running in hybrid-raw mode" \
-    "S03: not falling back to hybrid-raw"
+    "S03: not showing legacy hybrid-raw fallback (mode removed)"
 
 # ─── Send a real turn; digest fires on agent_end (debounce=0) ─────────────────
 scn_send "Hello. Briefly explain what a hash map is. Reply with DONE at the very end."
@@ -89,8 +89,8 @@ if [[ -n "$DIGEST_FILE" ]]; then
         "S03: digest has headline"
 else
     # TODO: If claude-bridge/claude-haiku-4-5 is not available in the current
-    # environment, the model resolver returns undefined and the lifecycle falls
-    # back to hybrid-raw mode. In that case this assertion fails. Run
+    # environment, the model resolver returns undefined and verdict is
+    # misconfigured (missing: "digest"). In that case this assertion fails. Run
     # `pi --list-models` to confirm haiku is available before debugging.
     scn_fail "S03: digest file did not appear within 30s — digest LLM call may have failed or haiku not available"
 fi

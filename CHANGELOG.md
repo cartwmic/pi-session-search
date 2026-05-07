@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.0.0] — 2026-05-06 — compact mode set (`remove-hybrid-raw-mode`)
+
+### Breaking changes
+
+- **`hybrid-raw` mode removed** — the three-mode system (`fts-raw`, `hybrid-raw`, `digest-mode`) is narrowed to two (`fts-raw`, `digest-hybrid`). Legacy `hybrid-raw` on-disk index files are wiped and rebuilt on first load.
+- **`digest-mode` renamed to `digest-hybrid`** — all code, config, and type references updated. On-disk `digest-mode` values are accepted during migration and rewritten as `digest-hybrid`.
+- **FTS schema upgrade** — two indexed columns (`digest_body`, `raw_content`) replace the single-column schema. `INDEX_VERSION` 4→5 triggers an unconditional wipe and rebuild on first load.
+- **Partial-config now produces a misconfigured verdict** — exactly one of embedder / digest model configured no longer silently demotes to `fts-raw`; instead it pins a persistent error status and returns remediation for search/digest tool invocations.
+- **Recovery commands always available** — `/session-embeddings-setup` and `/digest:settings` work in all three verdict states (valid fts-raw, valid digest-hybrid, misconfigured).
+- **Calibrated BM25 weights** — `W_DIGEST=2.0`, `W_RAW=1.0` (normative invariant: `W_DIGEST > W_RAW`), validated by a mathematical-constraint unit test.
+- **`pi.on` registration moved to module-load** — all handlers register exactly once per extension load, not per `session_start`. Prior per-`session_start` registration leaked handlers (append semantics with no unregister).
+- **Async verdict resolution with bounded retry** — `resolveModeVerdict` retries once after ~1000ms if the digest model registry was not yet populated at initial check. Does not retry for `missing: "embedder"` (synchronous, cannot benefit).
+
 ## [2.0.0] — 2026-05-06 — digest-driven indexing (`add-digest-driven-indexing`)
 
 ### Summary

@@ -240,47 +240,13 @@ describe("installDigestLifecycle", () => {
 	});
 
 	// ── 4.2 Notification when model unavailable + digestRequested ────────────
-
-	it("session_start: emits notify when no model and digestRequested (via explicit config)", async () => {
-		const pi = makeFakePi();
-		const storage = makeFakeStorage();
-		let notifyMsg = "";
-		let notifyLevel = "";
-
-		const ctx = makeCtx({
-			sessionId: "sess-notify",
-			models: [],
-			cwd: "/tmp/no-such-dir-xyz",
-		});
-		// Override ui.notify to capture
-		(ctx.ui as any).notify = (msg: string, level: string) => {
-			notifyMsg = msg;
-			notifyLevel = level;
-		};
-
-		const deps: LifecycleDeps = {
-			storage,
-			builder: { generateDigest: async () => null },
-			costTracker: { record: () => {} },
-			// Config with explicit provider+model → digestRequested = true
-			configLoader: () => makeConfig({ provider: "anthropic", model: "claude-haiku-4-5" }),
-			// Resolver returns undefined despite explicit config (simulates unavailable)
-			modelResolver: () => undefined,
-			indexAddDigested: () => {},
-		};
-
-		const handle = installDigestLifecycle(pi as any, deps);
-		await pi.emit("session_start", {}, ctx);
-
-		// Task 4.5.1: notification is now deferred to the 1s mode re-evaluation
-		// retry.  Wait past that window before asserting.
-		await flush(1100);
-
-		assert.ok(notifyMsg.includes("digest mode unavailable"), `unexpected msg: ${notifyMsg}`);
-		assert.strictEqual(notifyLevel, "warning");
-
-		handle.dispose();
-	});
+	//
+	// Removed in remove-hybrid-raw-mode (tasks 6.5 + 7.2): the lifecycle no
+	// longer emits a fallback notify when the digest model is unavailable.
+	// The misconfigured remediation notify is now owned by the extension's
+	// `resolveModeVerdict` path in src/index.ts and is exercised by
+	// `src/__tests__/index/mode-resolver.test.ts` and
+	// `src/__tests__/index/registration.test.ts`.
 
 	// ── 4.3 agent_end: fires immediately when debounceSeconds=0 ──────────────
 

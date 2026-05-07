@@ -14,7 +14,7 @@ This skill provides three tools:
 ### session_search
 Semantic search across all indexed sessions. Use for finding sessions by topic, technology, or intent.
 
-In **digest-mode** (the default when a digest model is available), results include the session's `digest.headline` (≤80 char display title) and a `digest.body` excerpt (200–400 word prose summary written by the LLM). In `fts-raw`/`hybrid-raw` modes, results show the raw first-user-message excerpt.
+In **digest-hybrid** mode (the default when a digest model is available), results include the session's `digest.headline` (≤80 char display title) and a `digest.body` excerpt (200–400 word prose summary written by the LLM). In `fts-raw` mode, results show the raw first-user-message excerpt.
 
 ```
 session_search(query="refactoring the auth module")
@@ -25,7 +25,7 @@ session_search(query="setting up CI pipeline for Nessie")
 ### session_list
 Browse sessions with filters. Good for time-based queries or project-specific browsing.
 
-In digest-mode, listed sessions show `digest.headline` when available; un-digested sessions fall back to a truncated first user message with a `(no digest — run /digest:update)` suffix.
+In digest-hybrid mode, listed sessions show `digest.headline` when available; un-digested sessions fall back to a truncated first user message with a `(no digest — run /digest:update)` suffix.
 
 ```
 session_list(project="Rosie")                    # Sessions in the Rosie project
@@ -68,7 +68,7 @@ session_read(session="...", include_tools=true)             # Include tool call 
 
 ## Setup
 
-Run `/session-embeddings-setup` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/digest:settings` and `/digest:backfill` to enable digest-mode for best recall.
+Run `/session-embeddings-setup` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/digest:settings` and `/digest:backfill` to enable digest-hybrid mode for best recall.
 
 To force a full re-index, run `/session-reindex`.
 
@@ -76,12 +76,12 @@ To force a full re-index, run `/session-reindex`.
 
 - All active sessions from `~/.pi/agent/sessions/`
 - All archived sessions from `~/.pi/agent/sessions-archive/`
-- **In digest-mode**: `digest.body` (LLM-written 200–400 word prose) and `digest.headline` (≤80 char title)
-- **In raw modes**: user messages, compaction summaries, files modified
+- **In digest-hybrid mode**: `digest.body` (LLM-written 200–400 word prose) and `digest.headline` (≤80 char title)
+- **In fts-raw mode**: user messages, compaction summaries, files modified
 
 ## Tips
 
-- In digest-mode, `session_search` result cards show `digest.headline` + a `digest.body` excerpt — this is what you want for "when did we…" and "what approach did we use for…" queries
+- In digest-hybrid mode, `session_search` result cards show `digest.headline` + a `digest.body` excerpt — this is what you want for "when did we…" and "what approach did we use for…" queries
 - Session search is best for semantic queries; session list is best for "show me recent sessions" or "what did we work on in project X"
 - For very long sessions, use `session_read` with pagination (`offset`/`limit`)
 - Set `include_tools=true` on `session_read` when you need to see the actual tool outputs (verbose)
