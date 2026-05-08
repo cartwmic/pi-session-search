@@ -11,6 +11,7 @@ import { buildSummary } from "../utils";
 import type { Mode } from "./mode";
 import type { SessionDigest } from "../digest/schema";
 import { loadDigest } from "../digest/storage";
+import { log, dbCall } from "../log";
 
 // ─── FTS side-car (for hybrid search) ────────────────────────────────
 
@@ -25,9 +26,13 @@ const FTS_DDL = `CREATE VIRTUAL TABLE s USING fts5(${FTS_COLUMNS}, tokenize='por
 
 class FtsSide {
   private db: DatabaseSync
+  private dbPath: string
   constructor(indexDir: string) {
-    this.db = new DatabaseSync(join(indexDir, "hybrid-fts.db"))
-    this.db.exec("PRAGMA busy_timeout = 5000;")
+    this.dbPath = join(indexDir, "hybrid-fts.db")
+    this.db = dbCall("open", { db: this.dbPath, comp: "FtsSide" }, () => new DatabaseSync(this.dbPath))
+    dbCall("pragma busy_timeout", { db: this.dbPath, comp: "FtsSide" }, () =>
+      this.db.exec("PRAGMA busy_timeout = 5000;"),
+    )
     this.ensureFtsSchema()
   }
 
@@ -99,41 +104,73 @@ class FtsSide {
     if (schemaValid && tokenizerValid) return
 
     // Schema or tokenizer mismatch — drop and recreate inside a transaction
-    this.db.exec("BEGIN")
-    this.db.exec("DROP TABLE IF EXISTS s")
-    this.db.exec(FTS_DDL)
-    this.db.exec("COMMIT")
+    dbCall("ensure-schema", { db: this.dbPath, comp: "FtsSide" }, () => {
+      this.db.exec("BEGIN")
+      try {
+        this.db.exec("DROP TABLE IF EXISTS s")
+        this.db.exec(FTS_DDL)
+        this.db.exec("COMMIT")
+      } catch (e) {
+        try { this.db.exec("ROLLBACK") } catch { /* COMMIT may have already failed */ }
+        throw e
+      }
+    })
   }
 
   upsert(id: string, content: { digestBody: string; rawContent: string; name: string }) {
-    this.db.exec("BEGIN")
-    this.db.prepare("DELETE FROM s WHERE id = ?").run(id)
-    this.db.prepare("INSERT INTO s (id, name, digest_body, raw_content) VALUES (?, ?, ?, ?)").run(
-      id, content.name, content.digestBody, content.rawContent,
+    dbCall(
+      "upsert",
+      { db: this.dbPath, comp: "FtsSide", id, digestBytes: content.digestBody.length, rawBytes: content.rawContent.length },
+      () => {
+        this.db.exec("BEGIN")
+        try {
+          this.db.prepare("DELETE FROM s WHERE id = ?").run(id)
+          this.db.prepare("INSERT INTO s (id, name, digest_body, raw_content) VALUES (?, ?, ?, ?)").run(
+            id, content.name, content.digestBody, content.rawContent,
+          )
+          this.db.exec("COMMIT")
+        } catch (e) {
+          try { this.db.exec("ROLLBACK") } catch { /* COMMIT may have already failed */ }
+          throw e
+        }
+      },
     )
-    this.db.exec("COMMIT")
   }
-  delete(id: string) { this.db.prepare("DELETE FROM s WHERE id = ?").run(id) }
-  clear() { this.db.exec("DELETE FROM s") }
+  delete(id: string) {
+    dbCall("delete", { db: this.dbPath, comp: "FtsSide", id }, () =>
+      this.db.prepare("DELETE FROM s WHERE id = ?").run(id),
+    )
+  }
+  clear() {
+    dbCall("clear", { db: this.dbPath, comp: "FtsSide" }, () => this.db.exec("DELETE FROM s"))
+  }
   /** Drop and recreate the FTS5 table — used on index version hard-reset. */
   hardReset() {
-    this.db.exec("DROP TABLE IF EXISTS s")
-    this.db.exec(FTS_DDL)
+    dbCall("hard-reset", { db: this.dbPath, comp: "FtsSide" }, () => {
+      this.db.exec("DROP TABLE IF EXISTS s")
+      this.db.exec(FTS_DDL)
+    })
   }
-  close() { this.db.close() }
+  close() {
+    dbCall("close", { db: this.dbPath, comp: "FtsSide" }, () => this.db.close())
+  }
   count(): number {
-    return (this.db.prepare("SELECT count(*) as c FROM s").get() as any).c
+    return dbCall("count", { db: this.dbPath, comp: "FtsSide" }, () =>
+      (this.db.prepare("SELECT count(*) as c FROM s").get() as any).c,
+    )
   }
   /** Returns id→rank map (rank starts at 1, best first). */
   searchRanks(q: string, limit: number): Map<string, number> {
     const fts = toFtsQuery(q)
     const out = new Map<string, number>()
     if (!fts) return out
-    const rows = this.db
-      .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s, ?, ?) LIMIT ?")
-      .all(fts, W_DIGEST, W_RAW, limit) as any[]
-    rows.forEach((r, i) => out.set(String(r.id), i + 1))
-    return out
+    return dbCall("search", { db: this.dbPath, comp: "FtsSide", limit }, () => {
+      const rows = this.db
+        .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s, ?, ?) LIMIT ?")
+        .all(fts, W_DIGEST, W_RAW, limit) as any[]
+      rows.forEach((r, i) => out.set(String(r.id), i + 1))
+      return out
+    })
   }
 }
 
@@ -252,12 +289,19 @@ export function migrateIndexFileIfStale(indexDir: string): MigrationMetadata {
   // kind: "phase1-failed" with the error so the caller can log it.
   const ftsPath = join(indexDir, "hybrid-fts.db")
   try {
-    const db = new DatabaseSync(ftsPath)
-    db.exec("BEGIN")
-    db.exec("DROP TABLE IF EXISTS s")
-    db.exec(`CREATE VIRTUAL TABLE s USING fts5(${FTS_COLUMNS}, tokenize='porter unicode61')`)
-    db.exec("COMMIT")
-    db.close()
+    dbCall("migrate-rebuild", { db: ftsPath, comp: "migrateIndexFileIfStale" }, () => {
+      const db = new DatabaseSync(ftsPath)
+      db.exec("BEGIN")
+      try {
+        db.exec("DROP TABLE IF EXISTS s")
+        db.exec(`CREATE VIRTUAL TABLE s USING fts5(${FTS_COLUMNS}, tokenize='porter unicode61')`)
+        db.exec("COMMIT")
+      } catch (e) {
+        try { db.exec("ROLLBACK") } catch { /* COMMIT may have already failed */ }
+        throw e
+      }
+      db.close()
+    })
   } catch (err: any) {
     // Phase 1 failed — transaction auto-rolled back
     return {
@@ -274,11 +318,17 @@ export function migrateIndexFileIfStale(indexDir: string): MigrationMetadata {
   // rows don't persist for users who later switch to fts-raw mode.
   const sessDbPath = join(indexDir, "sessions-fts.db")
   try {
-    const sessDb = new DatabaseSync(sessDbPath)
-    sessDb.exec("DROP TABLE IF EXISTS sessions")
-    sessDb.close()
-  } catch {
-    // sessions-fts.db may not exist — best-effort
+    dbCall("migrate-wipe", { db: sessDbPath, comp: "migrateIndexFileIfStale" }, () => {
+      const sessDb = new DatabaseSync(sessDbPath)
+      sessDb.exec("DROP TABLE IF EXISTS sessions")
+      sessDb.close()
+    })
+  } catch (e: any) {
+    // sessions-fts.db may not exist — best-effort (dbCall already logged)
+    log.debug(
+      { comp: "migrateIndexFileIfStale", db: sessDbPath, err: String(e?.message ?? e) },
+      "migrate-wipe skipped",
+    )
   }
 
   // ── Phase 2: Write session-index.json via temp+rename ─────────────
@@ -474,12 +524,16 @@ export class SessionIndex {
 
         // Wipe sessions-fts.db (owned by FtsSessionIndex) so v3 raw-content
         // rows don't persist when the user later switches to fts-raw mode.
+        const sessFtsPath = join(this.indexDir, "sessions-fts.db");
         try {
-          const sessDb = new DatabaseSync(join(this.indexDir, "sessions-fts.db"));
-          sessDb.exec("DROP TABLE IF EXISTS sessions");
-          sessDb.close();
-        } catch {
-          // sessions-fts.db may not exist yet — ignore
+          dbCall("hard-reset-sessions", { db: sessFtsPath, comp: "SessionIndex.load" }, () => {
+            const sessDb = new DatabaseSync(sessFtsPath);
+            sessDb.exec("DROP TABLE IF EXISTS sessions");
+            sessDb.close();
+          });
+        } catch (e: any) {
+          // sessions-fts.db may not exist yet — ignore (dbCall already logged)
+          log.debug({ comp: "SessionIndex.load", db: sessFtsPath, err: String(e?.message ?? e) }, "hard-reset-sessions skipped");
         }
 
         onNotify?.(

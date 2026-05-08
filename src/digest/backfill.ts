@@ -14,6 +14,7 @@ import { parsedConversationView } from "./conversation-view";
 import { generateDigest, emptyBuilderState } from "./builder";
 import type { DigestConfig } from "./config";
 import type { SessionIndex } from "../index/session-index";
+import { log } from "../log";
 
 // ─── Run backfill ─────────────────────────────────────────────────────────────
 
@@ -102,7 +103,7 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 
 				if (!result) {
 					failed++;
-					console.warn(`session-search: backfill: no digest returned for ${id}`);
+					log.warn({ comp: "backfill", sessionId: id }, "backfill: no digest returned");
 					continue;
 				}
 
@@ -129,7 +130,7 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 			} catch (err: unknown) {
 				failed++;
 				const msg = err instanceof Error ? err.message : String(err);
-				console.warn(`session-search: backfill error for ${id}: ${msg}`);
+				log.warn({ comp: "backfill", sessionId: id, err: msg }, "backfill error");
 			}
 		}
 

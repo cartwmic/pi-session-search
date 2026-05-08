@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { sessionSearchHome } from "../utils";
+import { log } from "../log";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ function parsePartial(path: string): Partial<DigestConfig> | null {
 	try {
 		return JSON.parse(raw) as Partial<DigestConfig>;
 	} catch {
-		console.warn(`session-search: malformed digest config at ${path}; falling back to defaults`);
+		log.warn({ comp: "digest-config", path }, "malformed digest config; falling back to defaults");
 		return null;
 	}
 }

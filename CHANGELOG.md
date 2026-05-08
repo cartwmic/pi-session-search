@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased] — structured logging + SQLite instrumentation
+
+### Summary
+
+Added a process-wide structured logger (pino + `rotating-file-stream`) so SQLite lock errors, transaction durations, digest failures, and backfill warnings are captured to a rotated file by default. Mirrors the `pi-claude-bridge` setup so both logs sit in `~/.pi/agent/` and are grep-friendly.
+
+### What's new
+
+- **`src/log.ts`** — lazy pino logger, JSON-per-line, default path `~/.pi/agent/session-search.log`, rotation at 10 MiB × 2 backups (≈30 MiB ceiling).
+- **`dbCall(op, fields, fn)` helper** — wraps SQLite calls; logs `op`/`db`/`durationMs` on success, `code`/`errno`/`sqliteCode` on error. Wired through every transaction boundary, schema op, and search query in `FtsSide`, `FtsSessionIndex`, and the migration paths in `session-index.ts`.
+- **Transaction safety** — every `BEGIN` block now has matching `ROLLBACK`-on-throw so a SQLITE_BUSY mid-transaction doesn't leak an open transaction across the next op.
+- **Existing `console.warn` / `console.error` calls** in `digest/backfill.ts`, `digest/builder.ts`, `digest/config.ts`, and `index.ts` rewritten to structured `log.warn` / `log.error`.
+- **Env vars** — see README § Environment Variables; key knobs are `PI_SESSION_SEARCH_DEBUG=0` to disable, `PI_SESSION_SEARCH_DEBUG_PATH` to relocate, `PI_SESSION_SEARCH_DEBUG_LEVEL` to widen/narrow.
+
+### Dependencies added
+
+- `pino` ^10.3.1
+- `rotating-file-stream` ^3.2.9
+
+### Test changes
+
+- `__tests__/digest/config.test.ts` no longer stubs `console.warn`. It now sets `PI_SESSION_SEARCH_LOG_SYNC_FILE` (test-only sync sink, no rotation) and reads records back with `readFileSync`. The logger module exposes `PI_SESSION_SEARCH_LOG_RESET=1` so the cached destination can be rebuilt mid-process.
+
 ## [3.0.0] — 2026-05-06 — compact mode set (`remove-hybrid-raw-mode`)
 
 ### Breaking changes

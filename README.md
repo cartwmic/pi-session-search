@@ -192,6 +192,32 @@ Session JSONL is dominated by tool output and chain-of-thought scaffolding — l
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | API key for OpenAI-compatible embedder if `apiKeyEnv` is set to this name |
+| `PI_SESSION_SEARCH_DEBUG` | `0` to disable file logging entirely. Default: on. |
+| `PI_SESSION_SEARCH_DEBUG_PATH` | Override log file path. Default: `~/.pi/agent/session-search.log`. |
+| `PI_SESSION_SEARCH_DEBUG_MAX_BYTES` | Per-file rotation size in bytes. Default: 10 MiB; 2 backups kept (≈30 MiB ceiling). |
+| `PI_SESSION_SEARCH_DEBUG_LEVEL` | Pino level: `trace`/`debug`/`info`/`warn`/`error`. Default: `debug`. |
+| `PI_SESSION_SEARCH_DEBUG_DIGEST` | Set to any value to dump full LLM responses when digest extraction fails. Default: off (warning still logged). |
+
+## Logging
+
+Structured JSON-per-line logs are written to `~/.pi/agent/session-search.log` by default — same directory as `claude-bridge.log` so you can grep both with one find.
+
+Rotation: pino + `rotating-file-stream`. When the live file hits the size cap, it rotates to `session-search.log.1`; the older backup becomes `session-search.log.2`; anything beyond is dropped.
+
+Every record carries `mod: "pi-session-search"`, `pid`, `level`, `time` (ISO), `msg`, plus structured fields the call site attached. SQLite call sites attach `op`, `db` (file path), `durationMs`, and on error `code` / `errno` / `sqliteCode` so `SQLITE_BUSY` and `database is locked` are greppable without a JSON parser:
+
+```bash
+# All errors
+grep '"level":50' ~/.pi/agent/session-search.log
+
+# Just the lock failures
+grep -E 'SQLITE_BUSY|database is locked' ~/.pi/agent/session-search.log
+
+# All transactions over 100 ms
+grep '"op":"sync:ingest-tx"' ~/.pi/agent/session-search.log | jq 'select(.durationMs > 100)'
+```
+
+To silence file logging in a one-off pi run: `PI_SESSION_SEARCH_DEBUG=0 pi`.
 
 ## Migration from upstream
 

@@ -5,6 +5,7 @@ import type { ParsedSession } from "../parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "../parser";
 import type { SearchResult, ListFilters } from "./session-index";
 import { truncate, buildSummary } from "../utils";
+import { log, dbCall } from "../log";
 
 /**
  * SQLite FTS5-backed session index. API-compatible with SessionIndex.
@@ -30,8 +31,10 @@ export class FtsSessionIndex {
   }
 
   async load(): Promise<void> {
-    this.db = new DatabaseSync(this.dbPath);
-    this.db.exec("PRAGMA busy_timeout = 5000;");
+    this.db = dbCall("open", { db: this.dbPath, comp: "FtsSessionIndex" }, () => new DatabaseSync(this.dbPath));
+    dbCall("pragma busy_timeout", { db: this.dbPath, comp: "FtsSessionIndex" }, () =>
+      this.db.exec("PRAGMA busy_timeout = 5000;"),
+    );
 
     // Migrate: add sizeBytes column if missing (FTS5 UNINDEXED columns)
     // FTS5 virtual tables don't support ALTER TABLE ADD COLUMN, so we check
@@ -44,10 +47,14 @@ export class FtsSessionIndex {
       // Column doesn't exist — need to recreate the table
     }
     if (!hasSizeBytes) {
-      this.db.exec("DROP TABLE IF EXISTS sessions");
+      log.info({ comp: "FtsSessionIndex", db: this.dbPath }, "schema migration: dropping legacy sessions table (no sizeBytes column)");
+      dbCall("drop-legacy-sessions", { db: this.dbPath, comp: "FtsSessionIndex" }, () =>
+        this.db.exec("DROP TABLE IF EXISTS sessions"),
+      );
     }
 
-    this.db.exec(`
+    dbCall("create-table", { db: this.dbPath, comp: "FtsSessionIndex", table: "sessions" }, () =>
+      this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS sessions USING fts5(
         id UNINDEXED,
         file UNINDEXED,
@@ -63,7 +70,8 @@ export class FtsSessionIndex {
         content,
         tokenize='porter unicode61'
       );
-    `);
+    `),
+    );
   }
 
   save(): void { /* auto-persisted */ }
@@ -114,14 +122,21 @@ export class FtsSessionIndex {
 
     // Remove sessions no longer present
     const delStmt = this.db.prepare("DELETE FROM sessions WHERE id = ?");
-    this.db.exec("BEGIN");
-    for (const id of currentIds) {
-      if (!idToFile.has(id)) {
-        delStmt.run(id);
-        removed++;
+    dbCall("sync:remove-tx", { db: this.dbPath, comp: "FtsSessionIndex", candidateCount: currentIds.size }, () => {
+      this.db.exec("BEGIN");
+      try {
+        for (const id of currentIds) {
+          if (!idToFile.has(id)) {
+            delStmt.run(id);
+            removed++;
+          }
+        }
+        this.db.exec("COMMIT");
+      } catch (e) {
+        try { this.db.exec("ROLLBACK"); } catch { /* COMMIT may have already failed */ }
+        throw e;
       }
-    }
-    this.db.exec("COMMIT");
+    });
 
     // Figure out what needs (re-)ingestion
     const toIngest: { id: string; file: string; archived: boolean; mtimeMs: number; sizeBytes: number }[] = [];
@@ -156,35 +171,46 @@ export class FtsSessionIndex {
     `);
     const replaceDel = this.db.prepare("DELETE FROM sessions WHERE id = ?");
 
-    this.db.exec("BEGIN");
-    let done = 0;
-    for (const item of toIngest) {
-      const session = parseSession(item.file, item.archived);
-      if (!session || session.userMessageCount === 0) { done++; continue; }
-      const content = buildContent(session);
-      const summary = buildSummary(session);
-      const isUpdate = currentIds.has(item.id);
-      if (isUpdate) replaceDel.run(item.id);
-      insertStmt.run(
-        session.id,
-        session.file,
-        session.archived ? 1 : 0,
-        session.startedAt,
-        session.projectSlug,
-        session.cwd,
-        item.mtimeMs,
-        item.sizeBytes,
-        JSON.stringify(session),
-        summary,
-        session.name ?? "",
-        content,
-      );
-      if (isUpdate) updated++; else added++;
-      done++;
-      if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
-    }
-    this.db.exec("COMMIT");
+    dbCall("sync:ingest-tx", { db: this.dbPath, comp: "FtsSessionIndex", ingestCount: toIngest.length }, () => {
+      this.db.exec("BEGIN");
+      try {
+        let done = 0;
+        for (const item of toIngest) {
+          const session = parseSession(item.file, item.archived);
+          if (!session || session.userMessageCount === 0) { done++; continue; }
+          const content = buildContent(session);
+          const summary = buildSummary(session);
+          const isUpdate = currentIds.has(item.id);
+          if (isUpdate) replaceDel.run(item.id);
+          insertStmt.run(
+            session.id,
+            session.file,
+            session.archived ? 1 : 0,
+            session.startedAt,
+            session.projectSlug,
+            session.cwd,
+            item.mtimeMs,
+            item.sizeBytes,
+            JSON.stringify(session),
+            summary,
+            session.name ?? "",
+            content,
+          );
+          if (isUpdate) updated++; else added++;
+          done++;
+          if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
+        }
+        this.db.exec("COMMIT");
+      } catch (e) {
+        try { this.db.exec("ROLLBACK"); } catch { /* COMMIT may have already failed */ }
+        throw e;
+      }
+    });
 
+    log.info(
+      { comp: "FtsSessionIndex", db: this.dbPath, added, updated, removed, moved },
+      "sync complete",
+    );
     return { added, updated, removed, moved };
   }
 
@@ -196,11 +222,16 @@ export class FtsSessionIndex {
   async search(query: string, limit = 10, _signal?: AbortSignal): Promise<SearchResult[]> {
     const fts = toFtsQuery(query);
     if (!fts) return [];
-    const rows = this.db
-      .prepare(
-        "SELECT json, summary, bm25(sessions) AS score FROM sessions WHERE sessions MATCH ? ORDER BY score LIMIT ?",
-      )
-      .all(fts, limit) as any[];
+    const rows = dbCall(
+      "search",
+      { db: this.dbPath, comp: "FtsSessionIndex", queryLen: query.length, limit },
+      () =>
+        this.db
+          .prepare(
+            "SELECT json, summary, bm25(sessions) AS score FROM sessions WHERE sessions MATCH ? ORDER BY score LIMIT ?",
+          )
+          .all(fts, limit),
+    ) as any[];
     return rows.map((r) => {
       const session = JSON.parse(String(r.json)) as ParsedSession;
       // Normalize BM25 (lower is better) into a 0..1-ish relevance score for display
@@ -251,7 +282,7 @@ export class FtsSessionIndex {
   }
 
   close(): void {
-    this.db.close();
+    dbCall("close", { db: this.dbPath, comp: "FtsSessionIndex" }, () => this.db.close());
   }
 }
 

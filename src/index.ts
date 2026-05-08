@@ -52,10 +52,15 @@ import { registerFindSessionCommand } from "./search/overlay";
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 import { truncate, pathToSlug, formatRelativeDate } from "./utils";
+import { log, getLogPath } from "./log";
 
 type AnyIndex = SessionIndex | FtsSessionIndex;
 
 export default function (pi: ExtensionAPI) {
+	// One-time startup log so users can confirm the logger is alive and find
+	// the active log file. Extension load happens once per pi process.
+	log.info({ comp: "extension", logPath: getLogPath() }, "pi-session-search loaded");
+
 	// ── Module-level state (tasks 2.3, 2.6) ─────────────────────────────────
 	let sessionIndex: AnyIndex | null = null;
 	let currentConfig: Config | null = null;
@@ -96,7 +101,9 @@ let currentRollup: CostRollup = emptyRollup();
 		if (stored) {
 			void sessionIndex
 				.addDigested(sessionId, stored.session, digest, opts)
-				.catch(console.error);
+				.catch((err) =>
+					log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed"),
+				);
 			return;
 		}
 		const files = discoverSessionFiles(
@@ -109,7 +116,9 @@ let currentRollup: CostRollup = emptyRollup();
 				if (parsed) {
 					void sessionIndex
 						.addDigested(sessionId, parsed, digest, opts)
-						.catch(console.error);
+						.catch((err) =>
+							log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed (post-scan)"),
+						);
 				}
 				break;
 			}

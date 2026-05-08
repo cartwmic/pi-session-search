@@ -35,6 +35,12 @@
     "@mariozechner/pi-tui": "^0.58.4",
     "@sinclair/typebox": "*"
   },
+
+  "dependencies": {
+    "pino": "^10.3.1",
+    "rotating-file-stream": "^3.2.9"
+  },
+
   "devDependencies": {
     "@types/node": "^25.5.0",
     "tsx": "^4.19.0",

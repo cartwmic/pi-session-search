@@ -1,7 +1,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 
 // ─── Setup: redirect HOME so real ~/.pi is untouched ─────────────────
 
@@ -108,25 +108,43 @@ describe("loadDigestConfig", () => {
 		assert.equal(cfg.debounceSeconds, 60); // default
 	});
 
+	/**
+	 * Capture warnings emitted by src/log.ts during a fresh module load.
+	 *
+	 * The logger constructs its destination at import time from
+	 * PI_SESSION_SEARCH_LOG_SYNC_FILE (test-only sync sink, no rotation, no
+	 * buffering). We point it at a per-test file, force a cache-busting reload
+	 * of `loadDigestConfig`, then read records back synchronously.
+	 */
+	async function loadAndCaptureLogs(): Promise<{
+		loadDigestConfig: typeof import("../../digest/config").loadDigestConfig;
+		readLog: () => string;
+	}> {
+		const logFile = join(TMP_ROOT, `log-${Date.now()}-${Math.random()}.jsonl`);
+		process.env.PI_SESSION_SEARCH_LOG_SYNC_FILE = logFile;
+		// Force log.ts to rebuild its destination on next emit so this test gets
+		// a fresh sync sink rather than the cached production rotating-file sink.
+		process.env.PI_SESSION_SEARCH_LOG_RESET = "1";
+		const mod = await load();
+		return {
+			loadDigestConfig: mod.loadDigestConfig,
+			readLog: () => (existsSync(logFile) ? readFileSync(logFile, "utf8") : ""),
+		};
+	}
+
 	it("malformed global JSON falls back to defaults and warns", async () => {
 		mkdirSync(GLOBAL_DIGEST_DIR, { recursive: true });
 		writeFileSync(GLOBAL_DIGEST_FILE, "{ this is not json }", "utf8");
 
-		const warnings: string[] = [];
-		const origWarn = console.warn;
-		console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
-
-		let cfg;
-		try {
-			const { loadDigestConfig } = await load();
-			cfg = loadDigestConfig(FAKE_CWD);
-		} finally {
-			console.warn = origWarn;
-		}
+		const { loadDigestConfig, readLog } = await loadAndCaptureLogs();
+		const cfg = loadDigestConfig(FAKE_CWD);
 
 		assert.equal(cfg.debounceSeconds, 60);
 		assert.equal(cfg.maxTokens, 1500);
-		assert.ok(warnings.some((w) => w.includes("malformed")), "expected a malformed-config warning");
+		assert.ok(
+			readLog().includes("malformed"),
+			"expected a malformed-config warning in session-search log",
+		);
 	});
 
 	it("malformed project JSON falls back to defaults (global only) and warns", async () => {
@@ -136,22 +154,13 @@ describe("loadDigestConfig", () => {
 		mkdirSync(PROJECT_DIGEST_DIR, { recursive: true });
 		writeFileSync(PROJECT_DIGEST_FILE, "not-valid-json", "utf8");
 
-		const warnings: string[] = [];
-		const origWarn = console.warn;
-		console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
-
-		let cfg;
-		try {
-			const { loadDigestConfig } = await load();
-			cfg = loadDigestConfig(FAKE_CWD);
-		} finally {
-			console.warn = origWarn;
-		}
+		const { loadDigestConfig, readLog } = await loadAndCaptureLogs();
+		const cfg = loadDigestConfig(FAKE_CWD);
 
 		// Global still applies; project malformed = ignored
 		assert.equal(cfg.debounceSeconds, 90);
 		assert.equal(cfg.maxTokens, 1500);
-		assert.ok(warnings.some((w) => w.includes("malformed")));
+		assert.ok(readLog().includes("malformed"));
 	});
 });
 

@@ -15,6 +15,7 @@ import { Value } from "@sinclair/typebox/value";
 import { submitDigestTool, validateDigest, DigestArgs } from "./schema";
 import type { SessionDigest } from "./schema";
 import type { ConversationView } from "./conversation-view";
+import { log } from "../log";
 
 // ─── BuilderState ─────────────────────────────────────────────────────────────
 
@@ -325,15 +326,19 @@ export async function generateDigest(
 
 		const rawArgs = extractDigestArgs(response);
 		if (rawArgs === null) {
-			// Debug: dump response when extraction fails (helps diagnose provider quirks)
+			// Always log extraction failure — always-on logger; PI_SESSION_SEARCH_DEBUG_DIGEST
+			// kept as opt-in for the *full* response dump (can be large).
+			log.warn({ comp: "digest" }, "extractDigestArgs returned null");
 			if (process.env.PI_SESSION_SEARCH_DEBUG_DIGEST) {
-				console.error("[digest] extractDigestArgs returned null. Response:");
-				console.error(JSON.stringify(response, null, 2).slice(0, 2000));
+				log.debug(
+					{ comp: "digest", responseSlice: JSON.stringify(response, null, 2).slice(0, 2000) },
+					"extractDigestArgs response dump",
+				);
 			}
 			return null;
 		}
 		if (process.env.PI_SESSION_SEARCH_DEBUG_DIGEST) {
-			console.error("[digest] rawArgs:", JSON.stringify(rawArgs).slice(0, 500));
+			log.debug({ comp: "digest", rawArgs: JSON.stringify(rawArgs).slice(0, 500) }, "rawArgs");
 		}
 
 		// Validate arguments against the TypeBox schema
