@@ -170,7 +170,7 @@ function serializeForPrompt(view: ConversationView): string {
 const SCHEMA_INSTRUCTIONS =
 	`Produce a JSON object with EXACTLY these fields (other field names will be rejected):\n` +
 	`  - body (string, ≥50 chars): 200–400 words of plain prose describing what was worked on\n` +
-	`  - headline (string, 1–80 chars): a concise display title for the session\n` +
+	`  - headline (string, 1–80 chars): a stable title describing the session as a whole — the through-line or overarching goal, not the latest activity. Treat the headline as sticky: do not rewrite it to track tactical shifts in the work; only change it when the session's overall topic has fundamentally pivoted.\n` +
 	`  - topics (array of strings, max 5, each ≤32 chars): main subject tags\n` +
 	`  - outcome (optional string, ≤200 chars): one sentence of what was accomplished\n\n` +
 	`Output ONLY the JSON object. No preamble, no markdown fences, no commentary. ` +
@@ -212,8 +212,10 @@ export function buildPrompt(
 		const capped = capInput(delta, model, /* includesPrevDigest */ true);
 		const deltaText = serializeForPrompt(capped);
 		userMessage =
+			`Previous headline: ${JSON.stringify(state.lastDigest!.headline)}\n` +
 			`Previous digest:\n${state.lastDigest!.body}\n\n` +
 			`New messages since last digest:\n${deltaText}\n\n` +
+			`Keep the previous headline verbatim unless the session's overall topic has fundamentally pivoted; the body should track new activity but the headline should not. ` +
 			`Update the digest if anything material changed. Otherwise repeat the previous digest verbatim. ` +
 			`Call submit_digest now.`;
 	} else {

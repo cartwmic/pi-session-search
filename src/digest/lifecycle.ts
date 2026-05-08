@@ -25,6 +25,7 @@ import { emptyBuilderState } from "./builder";
 import type { BuilderStateOnDisk } from "./storage";
 import type { ConversationView } from "./conversation-view";
 import { liveConversationView } from "./conversation-view";
+import { log } from "../log";
 
 // ─── Deps interface ──────────────────────────────────────────────────────────
 
@@ -265,6 +266,25 @@ export function installDigestLifecycle(
 
 			deps.storage.saveDigest(id, digest);
 			pi.setSessionName(digest.headline);
+
+			// Headline-drift observability (opt-in). Records the previous and new
+			// headline on every successful write so users can audit whether the
+			// stickiness directive is holding without manual inspection.
+			if (process.env.PI_SESSION_SEARCH_DEBUG_DIGEST) {
+				const prevHeadline = state.lastDigest?.headline ?? null;
+				if (prevHeadline !== null) {
+					log.debug(
+						{
+							comp: "digest",
+							sessionId: id,
+							prevHeadline,
+							newHeadline: digest.headline,
+							changed: prevHeadline !== digest.headline,
+						},
+						"headline diff on incremental write",
+					);
+				}
+			}
 
 			state.lastDigest = digest;
 			state.lastWriteTime = Date.now();

@@ -264,8 +264,28 @@ describe("buildPrompt — mode selection", () => {
 			"user message should instruct the model to call submit_digest");
 	});
 
-	it("incremental userMessage includes previous digest body", () => {
-		const digest = fakeDigest("The previous digest body text here, detailed enough.");
+	it("systemPrompt frames headline as a stable, whole-session title", () => {
+		// Stickiness language should appear in the schema instructions so it
+		// applies to both full and incremental modes. We assert on stable
+		// substrings; final wording can be tweaked without breaking the test
+		// so long as the framing remains.
+		const state = emptyBuilderState();
+		const { systemPrompt } = buildPrompt(state, makeView(["hi"]), THRESHOLD, model);
+		assert.ok(
+			systemPrompt.includes("as a whole"),
+			"systemPrompt should frame the headline as describing the session as a whole",
+		);
+		assert.ok(
+			/sticky|fundamentally pivoted/.test(systemPrompt),
+			"systemPrompt should instruct the model that the headline is sticky / only changes on a fundamental pivot",
+		);
+	});
+
+	it("incremental userMessage includes previous digest body and headline", () => {
+		const digest: SessionDigest = {
+			...fakeDigest("The previous digest body text here, detailed enough."),
+			headline: "Refactor auth module to use bcrypt",
+		};
 		const view = makeView(["new message"]);
 		const tokens = Math.ceil(
 			(view.messages.map((m) => `${m.role}: ${m.text}`).join("\n\n")).length / 4,
@@ -274,10 +294,42 @@ describe("buildPrompt — mode selection", () => {
 		const { userMessage } = buildPrompt(state, view, THRESHOLD, model);
 		assert.ok(userMessage.includes("Previous digest"));
 		assert.ok(userMessage.includes(digest.body));
+		assert.ok(
+			userMessage.includes("Previous headline"),
+			"incremental userMessage should label the previous headline",
+		);
+		assert.ok(
+			userMessage.includes(digest.headline),
+			"incremental userMessage should include the previous headline value verbatim",
+		);
 	});
 
-	it("full mode userMessage does not include previous digest body", () => {
-		const digest = fakeDigest("Old digest body content.");
+	it("incremental userMessage contains a headline-stickiness directive", () => {
+		const digest: SessionDigest = {
+			...fakeDigest("Body text long enough for the digest, just normal prose."),
+			headline: "Refactor auth module to use bcrypt",
+		};
+		const view = makeView(["new tactical message"]);
+		const tokens = Math.ceil(
+			(view.messages.map((m) => `${m.role}: ${m.text}`).join("\n\n")).length / 4,
+		);
+		const state = stateWithDigest(digest, 0, tokens - 50);
+		const { userMessage } = buildPrompt(state, view, THRESHOLD, model);
+		assert.ok(
+			/fundamentally pivoted/.test(userMessage),
+			"incremental userMessage should instruct the LLM to keep the headline unless the topic has fundamentally pivoted",
+		);
+		assert.ok(
+			userMessage.includes("verbatim"),
+			"incremental userMessage should still include the 'repeat verbatim' framing",
+		);
+	});
+
+	it("full mode userMessage does not include previous digest body or headline", () => {
+		const digest: SessionDigest = {
+			...fakeDigest("Old digest body content."),
+			headline: "Old session headline string",
+		};
 		const state = stateWithDigest(digest, 0, 0); // delta will be huge
 		// Need >10000 tokens above last-write (0). 10000 tokens × 4 chars = 40000 chars;
 		// serializeView adds a ~6-char role prefix, so 20_001 repetitions of "x " (2
@@ -287,6 +339,14 @@ describe("buildPrompt — mode selection", () => {
 		const { mode, userMessage } = buildPrompt(state, view, THRESHOLD, model);
 		assert.equal(mode, "full");
 		assert.ok(!userMessage.includes("Previous digest"));
+		assert.ok(
+			!userMessage.includes("Previous headline"),
+			"full mode should not surface a Previous headline line",
+		);
+		assert.ok(
+			!userMessage.includes(digest.headline),
+			"full mode should not echo the prior headline string into the user message",
+		);
 	});
 
 	it("incremental extracts only messages after lastWrittenMessageIndex", () => {
