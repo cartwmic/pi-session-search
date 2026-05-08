@@ -161,9 +161,14 @@ export interface BackfillDryRunDeps {
  *
  * Formula (per task 8.6):
  *   inputTokenEstimate  = Σ(file.sizeBytes / 4)
- *   inputCostUsd        = inputTokenEstimate × model.cost.input
- *   outputCostUsd       = sessionCount × 700 × model.cost.output   (700 = typical output)
- *   embedCostUsd        = sessionCount × 700 × pricePerInputToken  (if configured)
+ *   inputCostUsd        = inputTokenEstimate × model.cost.input  / 1_000_000
+ *   outputCostUsd       = sessionCount × 700 × model.cost.output / 1_000_000   (700 = typical output)
+ *   embedCostUsd        = sessionCount × 700 × pricePerInputToken             (if configured)
+ *
+ * Note: pi-ai's `Model<Api>.cost.{input,output}` is denominated in USD per 1M
+ * tokens (see `@mariozechner/pi-ai/dist/models.js` `applyCost`). The /1_000_000
+ * divisor here matches that convention. `embedder.pricePerInputToken` keeps
+ * its literal name — USD per single token — for backward compatibility.
  */
 export function runBackfillDryRun(deps: BackfillDryRunDeps): void {
 	const { files, activeSessionId, resolvedModel, embedderPricePerInputToken, notify } = deps;
@@ -191,8 +196,9 @@ export function runBackfillDryRun(deps: BackfillDryRunDeps): void {
 		return;
 	}
 
-	const inputRate = (resolvedModel as any).cost?.input ?? 0;
-	const outputRate = (resolvedModel as any).cost?.output ?? 0;
+	// pi-ai stores cost.{input,output} as USD per 1M tokens; convert to per-token.
+	const inputRate = ((resolvedModel as any).cost?.input ?? 0) / 1_000_000;
+	const outputRate = ((resolvedModel as any).cost?.output ?? 0) / 1_000_000;
 	const inputCostUsd = inputTokenEstimate * inputRate;
 	const outputCostUsd = sessionCount * 700 * outputRate;
 

@@ -28,14 +28,17 @@ function makeModel(inputRate: number, outputRate: number) {
 function dryRunCostFormula(opts: {
 	sessionCount: number;
 	totalBytes: number;
+	/** USD per 1M tokens (pi-ai convention). */
 	inputRate: number;
+	/** USD per 1M tokens (pi-ai convention). */
 	outputRate: number;
+	/** USD per single token. */
 	embedderPricePerInputToken?: number;
 }): string[] {
 	const { sessionCount, totalBytes, inputRate, outputRate, embedderPricePerInputToken } = opts;
 	const inputTokenEstimate = totalBytes / 4;
-	const inputCostUsd = inputTokenEstimate * inputRate;
-	const outputCostUsd = sessionCount * 700 * outputRate;
+	const inputCostUsd = (inputTokenEstimate * inputRate) / 1_000_000;
+	const outputCostUsd = (sessionCount * 700 * outputRate) / 1_000_000;
 
 	const lines: string[] = [
 		`Backfill dry run — ${sessionCount} un-digested session(s)`,
@@ -65,12 +68,12 @@ function dryRunCostFormula(opts: {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("runBackfillDryRun — cost formula", () => {
-	it("computes correct estimates for {sessionCount:5, totalBytes:50000, input:0.000001, output:0.000005}", () => {
+	it("computes correct estimates for {sessionCount:5, totalBytes:50000, input:1.0/M, output:5.0/M}", () => {
 		const lines = dryRunCostFormula({
 			sessionCount: 5,
 			totalBytes: 50_000,
-			inputRate: 0.000_001,
-			outputRate: 0.000_005,
+			inputRate: 1.0,
+			outputRate: 5.0,
 		});
 
 		// Header
@@ -98,8 +101,8 @@ describe("runBackfillDryRun — cost formula", () => {
 		const lines = dryRunCostFormula({
 			sessionCount: 5,
 			totalBytes: 50_000,
-			inputRate: 0.000_001,
-			outputRate: 0.000_005,
+			inputRate: 1.0,
+			outputRate: 5.0,
 			embedderPricePerInputToken: 0.000_002,
 		});
 
@@ -118,8 +121,8 @@ describe("runBackfillDryRun — cost formula", () => {
 			dryRunCostFormula({
 				sessionCount: 0,
 				totalBytes: 0,
-				inputRate: 0.000_001,
-				outputRate: 0.000_005,
+				inputRate: 1.0,
+				outputRate: 5.0,
 			}),
 		);
 	});
@@ -140,16 +143,16 @@ describe("runBackfillDryRun — cost formula", () => {
 			sessionCount: 1,
 			totalBytes: 4_000,
 			inputRate: 0,
-			outputRate: 0.000_01,
+			outputRate: 10.0,
 		});
 		const doubled = dryRunCostFormula({
 			sessionCount: 2,
 			totalBytes: 8_000,
 			inputRate: 0,
-			outputRate: 0.000_01,
+			outputRate: 10.0,
 		});
 
-		// 1 × 700 × 0.00001 = 0.0070; 2 × 700 × 0.00001 = 0.0140
+		// 1 × 700 × 10.0 / 1M = 0.0070; 2 × 700 × 10.0 / 1M = 0.0140
 		assert.match(base[3], /\$0\.0070/);
 		assert.match(doubled[3], /\$0\.0140/);
 	});
