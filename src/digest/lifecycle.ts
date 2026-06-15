@@ -7,12 +7,19 @@
  *   session_compact  → immediate digest trigger (bypass debounce)
  *   session_shutdown → abort in-flight call + cleanup
  *
- * Coalescing rule (4.8): if a trigger fires while pendingCall===true, set
- * dirty=true instead of queueing. When the in-flight call completes (either
- * way), if dirty, schedule ONE follow-up after 250ms tail delay and clear dirty.
+ * Coalescing rule (4.8): if an AUTOMATIC trigger (agent_end / session_compact)
+ * fires while pendingCall===true, set dirty=true instead of queueing. When the
+ * in-flight call completes (either way), if dirty, schedule ONE follow-up after
+ * 250ms tail delay and clear dirty.
  *
- * Hard timeout (4.9): a 60-second AbortController wraps every LLM call; on
- * timeout the call is treated as a failure (4.7).
+ * No liveness/wedge timeouts (constitution principle I): there is NO wall-clock
+ * timer that aborts or gives up on a possibly-wedged in-flight call. Recovery is
+ * caller-driven: a SLASH-COMMAND trigger (triggerNow) SUPERSEDES an in-flight
+ * call by aborting it (currentAbort.abort() -> ac.signal -> SIGKILL) and firing
+ * a fresh digest; lifecycle reapers (session_shutdown / deactivate / dispose)
+ * abort on teardown. The AbortController + ac.signal threading are retained for
+ * exactly these caller/reaper aborts. An aborted call is treated as a failure
+ * (4.7): prior digest untouched, no setSessionName.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -168,9 +175,6 @@ export function installDigestLifecycle(
 	/** AbortController for the currently in-flight LLM call. */
 	let currentAbort: AbortController | null = null;
 
-	/** Hard-timeout timer companion to `currentAbort`. */
-	let hardTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
-
 	/** Follow-up timer for the 250ms coalescing tail delay (4.8). */
 	let followUpTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -199,13 +203,6 @@ export function installDigestLifecycle(
 		}
 	}
 
-	function clearHardTimeout(): void {
-		if (hardTimeoutHandle !== null) {
-			clearTimeout(hardTimeoutHandle);
-			hardTimeoutHandle = null;
-		}
-	}
-
 	/**
 	 * Core fire-and-forget digest invocation.
 	 *
@@ -225,11 +222,12 @@ export function installDigestLifecycle(
 		state.pendingCall = true;
 		state.dirty = false;
 
-		// Build the abort controller + hard timeout.
+		// Build the abort controller. The signal is threaded into generateDigest
+		// so caller-driven supersession and lifecycle reapers can kill the call
+		// (currentAbort.abort() -> ac.signal -> claude-bridge -> SIGKILL). There is
+		// deliberately NO liveness/wedge timeout here (constitution principle I).
 		const ac = new AbortController();
-		const timeout = setTimeout(() => ac.abort(), 60_000);
 		currentAbort = ac;
-		hardTimeoutHandle = timeout;
 
 		// Snapshot ctx so the async continuation doesn't race with session switch.
 		const ctx = currentCtx;
@@ -247,7 +245,6 @@ export function installDigestLifecycle(
 		} catch {
 			result = null;
 		} finally {
-			clearHardTimeout();
 			if (currentAbort === ac) currentAbort = null;
 		}
 
@@ -415,8 +412,7 @@ export function installDigestLifecycle(
 			currentAbort = null;
 		}
 
-		// Clear all timers.
-		clearHardTimeout();
+		// Clear scheduling timers.
 		clearDebounceTimer();
 		clearFollowUpTimer();
 
@@ -438,7 +434,6 @@ export function installDigestLifecycle(
 			currentAbort = null;
 		}
 
-		clearHardTimeout();
 		clearDebounceTimer();
 		clearFollowUpTimer();
 
@@ -463,24 +458,27 @@ export function installDigestLifecycle(
 
 	// Expose lastError for debugging (optional - not in the primary contract)
 	/**
-	 * Public entry point for slash commands. Awaits any in-flight digest
-	 * completion before issuing the new trigger; returns the resulting digest
-	 * (or null on failure). The wait avoids /digest:update racing with the
-	 * agent_end auto-trigger - simultaneous `complete()` calls cause the LLM
-	 * provider to abort one mid-stream, returning a thinking-only response
-	 * that fails JSON extraction.
+	 * Public entry point for slash commands. SUPERSEDES any in-flight digest
+	 * call instead of waiting on it: if a call is pending it is aborted
+	 * (currentAbort.abort() -> ac.signal -> SIGKILL of the claude-p process
+	 * group), the mutex is released, and a fresh digest is fired immediately.
+	 * Returns the resulting digest (or null on failure).
+	 *
+	 * There is deliberately NO wall-clock wait/deadline here (constitution
+	 * principle I): a stale or wedged in-flight call is KILLED, not awaited. The
+	 * single-in-flight invariant is preserved because supersession clears
+	 * `pendingCall` before fireDigest runs, so fireDigest's pendingCall guard
+	 * does not coalesce this superseding call.
 	 */
 	async function triggerNow(opts?: { forceFull?: boolean }): Promise<SessionDigest | null> {
 		if (disposed) return null;
 
-		// Wait for any in-flight call to complete (poll-based; pendingCall is
-		// private to this module). Cap the wait at 90 s to avoid hanging the
-		// slash command if something pathological is happening.
-		const deadline = Date.now() + 90_000;
-		while (state.pendingCall && Date.now() < deadline) {
-			await new Promise((r) => setTimeout(r, 200));
+		// Caller-driven supersession: kill any in-flight call and take the mutex.
+		if (state.pendingCall) {
+			currentAbort?.abort();
+			currentAbort = null;
+			state.pendingCall = false;
 		}
-		if (state.pendingCall) return null; // gave up waiting
 
 		// For /digest:rewrite: zero out the anchor so buildPrompt picks full mode
 		// regardless of accumulated delta. The threshold check is

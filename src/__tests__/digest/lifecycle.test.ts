@@ -11,8 +11,9 @@
  *  - debounce: agent_end within window schedules a timer; outside fires immediately
  *  - coalescing with deferred flush: dirty flag + 250ms follow-up
  *  - deferred flush cleared on shutdown
- *  - abort on shutdown cancels in-flight call
- *  - hard timeout (60s) treated as failure
+ *  - abort on shutdown cancels in-flight call (reaper-driven)
+ *  - caller-driven abort (no liveness timeout) treated as failure
+ *  - triggerNow supersedes an in-flight pendingCall (kill, don't wait)
  *  - state persists across simulated restart
  */
 
@@ -424,7 +425,7 @@ describe("installDigestLifecycle", () => {
 
 	// ── 4.5 session_shutdown: aborts in-flight AbortController ───────────────
 
-	it("session_shutdown: aborts in-flight LLM call via AbortController", async () => {
+	it("session_shutdown: reaper aborts in-flight LLM call via AbortController [session-digest.caller-driven-cancellation-without-liveness-timeouts]", async () => {
 		const pi = makeFakePi();
 		const storage = makeFakeStorage();
 		let capturedSignal: AbortSignal | undefined;
@@ -650,13 +651,19 @@ describe("installDigestLifecycle", () => {
 		handle.dispose();
 	});
 
-	// ── 4.9 Hard timeout treated as failure ───────────────────────────────────
+	// ── Caller-driven abort treated as failure (no liveness timeout) ───────────
+	//
+	// AC: session-digest.caller-driven-cancellation-without-liveness-timeouts
+	// There is NO internal 60s/90s wedge timer. When something aborts the
+	// in-flight call's signal (a reaper, supersession, or external caller), the
+	// call collapses to the null failure path: prior digest intact, no
+	// setSessionName.
 
-	it("hard timeout: AbortController fires after 60s and result is null (failure)", async () => {
+	it("caller abort: aborting ac.signal yields null (failure), prior digest preserved [session-digest.caller-driven-cancellation-without-liveness-timeouts]", async () => {
 		const pi = makeFakePi();
 		const storage = makeFakeStorage();
-		const priorDigest = makeDigest({ headline: "Before timeout" });
-		storage.saved.set("timeout-session", priorDigest);
+		const priorDigest = makeDigest({ headline: "Before abort" });
+		storage.saved.set("abort-session", priorDigest);
 		let capturedSignal: AbortSignal | undefined;
 
 		const deps: LifecycleDeps = {
@@ -679,23 +686,82 @@ describe("installDigestLifecycle", () => {
 		};
 
 		const handle = installDigestLifecycle(pi as any, deps);
-		const ctx = makeCtx({ sessionId: "timeout-session", models: [makeModel()] });
+		const ctx = makeCtx({ sessionId: "abort-session", models: [makeModel()] });
 		await pi.emit("session_start", {}, ctx);
 
 		pi.lastSetName = undefined;
 		await pi.emit("agent_end", {}, ctx);
 		await flush(5); // let the call start
 
-		assert.ok(capturedSignal !== undefined, "signal should be passed");
+		assert.ok(capturedSignal !== undefined, "signal should be passed (ac.signal threaded into generateDigest)");
+		assert.strictEqual(capturedSignal!.aborted, false, "no internal timer should abort a healthy in-flight call");
 
-		// Manually abort to simulate timeout (saves us waiting 60 real seconds)
+		// Caller-driven abort (what a reaper / supersession / external caller does).
 		capturedSignal!.dispatchEvent(new Event("abort"));
 		await flush(20);
 
-		// Should be treated as failure: setSessionName not called
-		assert.strictEqual(pi.lastSetName, undefined, "setSessionName should not be called on timeout failure");
-		// Prior digest still intact
-		assert.strictEqual(storage.saved.get("timeout-session")?.headline, "Before timeout");
+		// Treated as failure: setSessionName not called, prior digest intact.
+		assert.strictEqual(pi.lastSetName, undefined, "setSessionName should not be called on abort failure");
+		assert.strictEqual(storage.saved.get("abort-session")?.headline, "Before abort");
+
+		handle.dispose();
+	});
+
+	// ── triggerNow supersedes an in-flight call (kill, don't wait) ──────────
+	//
+	// AC: session-digest.digest-lifecycle-triggers (supersession branch)
+	// A slash-command trigger while pendingCall===true MUST abort the in-flight
+	// call via currentAbort, clear pendingCall, and fire a fresh digest
+	// immediately — with NO 90s deadline wait.
+
+	it("triggerNow: supersedes an in-flight pendingCall (aborts it, fires fresh) [session-digest.digest-lifecycle-triggers]", async () => {
+		const pi = makeFakePi();
+		const storage = makeFakeStorage();
+		const freshDigest = makeDigest({ headline: "Superseding digest" });
+
+		let calls = 0;
+		let firstSignal: AbortSignal | undefined;
+
+		const deps: LifecycleDeps = {
+			storage,
+			builder: {
+				generateDigest: async (_m, _v, _s, opts) => {
+					calls += 1;
+					if (calls === 1) {
+						firstSignal = opts?.signal;
+						// In-flight call that never resolves on its own — only a
+						// caller-driven abort can end it. No internal timer exists.
+						return new Promise<{ digest: SessionDigest; anchor: number } | null>(() => {});
+					}
+					// Superseding call resolves with a fresh digest.
+					return { digest: freshDigest, anchor: 3 };
+				},
+			},
+			costTracker: { record: () => {} },
+			configLoader: () => makeConfig({ debounceSeconds: 0 }),
+			modelResolver: () => makeModel(),
+			indexAddDigested: () => {},
+		};
+
+		const handle = installDigestLifecycle(pi as any, deps) as any;
+		const ctx = makeCtx({ sessionId: "supersede-session", models: [makeModel()] });
+		await pi.emit("session_start", {}, ctx);
+
+		// Start an automatic digest → first (wedged) call is in flight.
+		await pi.emit("agent_end", {}, ctx);
+		await flush(5);
+		assert.strictEqual(calls, 1, "first (in-flight) call should have started");
+		assert.ok(firstSignal !== undefined, "first call signal captured");
+		assert.strictEqual(firstSignal!.aborted, false, "in-flight call not aborted yet (no liveness timer)");
+
+		// Slash-command supersession: aborts the in-flight call, fires fresh.
+		const result = await handle.triggerNow();
+
+		assert.strictEqual(firstSignal!.aborted, true, "supersession must abort the in-flight call's signal");
+		assert.strictEqual(calls, 2, "a fresh superseding digest call must be fired");
+		assert.ok(result !== null, "triggerNow returns the superseding digest, not null");
+		assert.strictEqual(result.headline, "Superseding digest");
+		assert.strictEqual(storage.saved.get("supersede-session")?.headline, "Superseding digest");
 
 		handle.dispose();
 	});
