@@ -23,6 +23,7 @@ import {
 } from "./digest/config";
 import type { DigestConfig } from "./digest/config";
 import { resolveModel } from "./digest/model-resolver";
+import { pickDigestModel } from "./digest/model-picker";
 import { loadDigest, saveDigest, loadBuilderState, saveBuilderState } from "./digest/storage";
 import type { SessionDigest } from "./digest/schema";
 import {
@@ -384,21 +385,72 @@ let currentRollup: CostRollup = emptyRollup();
 	// ── 8.1 /digest:settings (task 2.8 — recovery command, no short-circuit) ──
 	pi.registerCommand("digest:settings", {
 		description:
-			"Create session-digest config at ~/.pi/session-search/digest.json (if absent) and show its path",
+			"Configure session-digest model interactively",
 		handler: async (_args, ctx) => {
 			const configPath = getDigestConfigPath();
 			if (!existsSync(configPath)) {
-				const defaults = loadDigestConfig(ctx.cwd || process.cwd());
-				saveDigestConfig(defaults);
+				const picked = await pickDigestModel(ctx, { prompt: "Select digest model" });
+				if (!picked) {
+					ctx.ui.notify("Digest config creation cancelled.", "info");
+					return;
+				}
+				const [provider, ...modelParts] = picked.split("/");
+				const model = modelParts.join("/");
+				const config: DigestConfig = {
+					provider,
+					model,
+					debounceSeconds: 60,
+					resummarizeTokenThreshold: 4000,
+				};
+				saveDigestConfig(config);
 				ctx.ui.notify(
-					`Digest config created at ${configPath}. Edit it then run /reload to activate.`,
+					`Digest config created at ${configPath} with model ${picked}. Run /reload to activate.`,
 					"success",
 				);
+				if (!currentConfig?.embedder) {
+					ctx.ui.notify(
+						"Warning: digest-hybrid mode also requires an embedder. " +
+							"Run /session-embeddings-setup to configure semantic search, " +
+							"or remove digest.json to stay in fts-raw mode.",
+						"warning",
+					);
+				}
 			} else {
+				const current = loadDigestConfig(ctx.cwd || process.cwd());
+				const currentModel =
+					current.provider && current.model
+						? `${current.provider}/${current.model}`
+						: undefined;
+
+				const picked = await pickDigestModel(ctx, {
+					prompt: "Change digest model",
+					currentModel,
+				});
+				if (!picked) {
+					ctx.ui.notify("Digest config unchanged.", "info");
+					return;
+				}
+
+				const [provider, ...modelParts] = picked.split("/");
+				const model = modelParts.join("/");
+				const config: DigestConfig = {
+					...current,
+					provider,
+					model,
+				};
+				saveDigestConfig(config);
 				ctx.ui.notify(
-					`Digest config exists at ${configPath}. Edit it then run /reload to activate.`,
-					"info",
+					`Digest model updated to ${picked}. Run /reload to activate.`,
+					"success",
 				);
+				if (!currentConfig?.embedder) {
+					ctx.ui.notify(
+						"Warning: digest-hybrid mode also requires an embedder. " +
+							"Run /session-embeddings-setup to configure semantic search, " +
+							"or remove digest.json to stay in fts-raw mode.",
+						"warning",
+					);
+				}
 			}
 		},
 	});
