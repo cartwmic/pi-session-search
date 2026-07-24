@@ -15,7 +15,7 @@
  */
 
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { CURSOR_MARKER, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { SearchResult } from "../index/session-index.js";
@@ -282,37 +282,43 @@ export class FindSessionOverlayComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    // Use pi-tui's protocol-aware key matching rather than raw byte comparison.
+    // Under the Kitty keyboard protocol (which pi-tui enables via `CSI > 7 u`),
+    // Escape is reported as `\x1b[27u`, NOT a lone `\x1b` — so a raw
+    // `data === "\x1b"` check silently fails and the overlay becomes
+    // impossible to dismiss (most visible when there are no results and Enter
+    // is a no-op). matchesKey() handles both legacy and Kitty encodings.
     // Arrow Up
-    if (data === "\x1b[A") {
+    if (matchesKey(data, "up")) {
       this.moveUp();
       this.requestRender();
       return;
     }
     // Arrow Down
-    if (data === "\x1b[B") {
+    if (matchesKey(data, "down")) {
       this.moveDown();
       this.requestRender();
       return;
     }
     // Enter
-    if (data === "\r" || data === "\n") {
+    if (matchesKey(data, "enter")) {
       this.confirm();
       return;
     }
     // Esc
-    if (data === "\x1b") {
+    if (matchesKey(data, "escape")) {
       this.done(undefined);
       return;
     }
     // Backspace / DEL
-    if (data === "\x7f" || data === "\b") {
+    if (matchesKey(data, "backspace")) {
       this.query = this.query.slice(0, -1);
       this.scheduleSearch();
       this.requestRender();
       return;
     }
     // Ctrl+U — clear query
-    if (data === "\x15") {
+    if (matchesKey(data, "ctrl+u")) {
       this.query = "";
       this.scheduleSearch();
       this.requestRender();

@@ -8,6 +8,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { setKittyProtocolActive } from "@mariozechner/pi-tui";
 import { FindSessionOverlayComponent } from "../../search/overlay.js";
 import type { SearchableIndex } from "../../search/overlay.js";
 import type { SearchResult } from "../../index/session-index.js";
@@ -432,6 +433,30 @@ describe("FindSessionOverlayComponent", () => {
 
       assert.equal(calls.length, 1, "done should be called exactly once");
       assert.equal(calls[0], undefined, "done should be called with undefined, not a path");
+    });
+
+    // Regression: under the Kitty keyboard protocol (which pi-tui enables),
+    // Escape is reported as `\x1b[27u`, not a lone `\x1b`. With no results the
+    // overlay was previously impossible to dismiss (Enter is a no-op, and the
+    // raw `data === "\x1b"` check never matched the Kitty encoding).
+    it("Esc (Kitty CSI-u encoding) dismisses even with no results", async () => {
+      setKittyProtocolActive(true);
+      try {
+        const index = makeFakeIndex([], {});
+        let resolvedWith: string | undefined = "NOT_SET";
+        const done = (r: string | undefined) => { resolvedWith = r; };
+
+        const component = new FindSessionOverlayComponent(
+          makeFakeTui() as any, fakeTheme, done, index, "no-match", 0,
+        );
+        await flushAsync();
+
+        component.handleInput("\x1b[27u"); // Kitty-encoded Escape
+
+        assert.equal(resolvedWith, undefined, "Kitty-encoded Esc should dismiss with undefined");
+      } finally {
+        setKittyProtocolActive(false);
+      }
     });
   });
 

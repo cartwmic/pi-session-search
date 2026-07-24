@@ -813,7 +813,11 @@ export class SessionIndex {
               };
             }
           } else {
-            // No digest yet — record in metadata only (listable, not searchable)
+            // No digest yet — record in metadata AND index raw content for FTS
+            // so keyword/BM25 search works over un-digested sessions. digest_body
+            // stays empty; both it and the embedding fill in later once a digest
+            // is generated. This decouples raw keyword search from the digest
+            // pipeline (which may be slow, rate-limited, or provider-broken).
             this.data.sessions[item.id] = {
               session: stripHeavyFields(session),
               digest: null,
@@ -821,7 +825,7 @@ export class SessionIndex {
               mtimeMs: item.mtimeMs,
               sizeBytes: item.sizeBytes,
             };
-            // Do NOT upsert into FTS — empty content row pollutes BM25
+            this.fts.upsert(item.id, { digestBody: "", rawContent: buildRawFtsContent(session), name: session.name ?? "" })
           }
 
           if (isUpdate) updated++;
@@ -940,40 +944,50 @@ export class SessionIndex {
     limit: number = 10,
     signal?: AbortSignal
   ): Promise<SearchResult[]> {
-    let entries = Object.entries(this.data.sessions);
-    if (entries.length === 0) return [];
+    const allEntries = Object.entries(this.data.sessions);
+    if (allEntries.length === 0) return [];
 
-    // Task 6.11: in digest-hybrid, exclude un-digested entries from cosine scoring
+    // Task 6.11: in digest-hybrid, cosine scoring runs ONLY over entries that
+    // have an embedding (i.e. digested sessions). The FTS/BM25 side below still
+    // covers every session (digested or not), so keyword search keeps working
+    // even when nothing has been digested yet.
+    let embeddedEntries = allEntries;
     if (this.mode === "digest-hybrid") {
-      entries = entries.filter(([, entry]) => {
+      embeddedEntries = allEntries.filter(([, entry]) => {
         const emb = entry.embedding;
         if (Array.isArray(emb)) return emb.length > 0;
         return typeof emb === "string" && emb.length > 0;
       });
     }
 
-    if (entries.length === 0) return [];
-
-    const queryEmbedding = await this.embedder.embed(query, this.abortController.signal);
-    if (signal?.aborted) return [];
-
-    // Rank by cosine similarity
-    const cosineScored = entries
-      .map(([id, entry]) => ({
-        id,
-        entry,
-        score: cosineSimilarity(queryEmbedding, decodeEmbedding(entry.embedding)),
-      }))
-      .sort((a, b) => b.score - a.score);
-
     // Pull a larger candidate pool from each side so fusion has room to rank
     const poolSize = Math.max(limit * 5, 100);
     const cosineRanks = new Map<string, number>();
-    cosineScored.slice(0, poolSize).forEach((s, i) => {
-      cosineRanks.set(s.id, i + 1);
-    });
+
+    // Only embed the query + run cosine when there is at least one embedded
+    // session; otherwise skip the (potentially failing / rate-limited) embedder
+    // call entirely and fall back to pure BM25 keyword search.
+    if (embeddedEntries.length > 0) {
+      const queryEmbedding = await this.embedder.embed(query, this.abortController.signal);
+      if (signal?.aborted) return [];
+
+      const cosineScored = embeddedEntries
+        .map(([id, entry]) => ({
+          id,
+          entry,
+          score: cosineSimilarity(queryEmbedding, decodeEmbedding(entry.embedding)),
+        }))
+        .sort((a, b) => b.score - a.score);
+
+      cosineScored.slice(0, poolSize).forEach((s, i) => {
+        cosineRanks.set(s.id, i + 1);
+      });
+    }
 
     const ftsRanks = this.fts.searchRanks(query, poolSize);
+
+    // Neither semantic nor keyword side produced a candidate — nothing matches.
+    if (cosineRanks.size === 0 && ftsRanks.size === 0) return [];
 
     // RRF fusion: score = Σ 1 / (k + rank)
     const K = 60;
