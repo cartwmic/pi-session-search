@@ -7,7 +7,7 @@ Tags: `[ci]` = CI-safe (no live model access required for pass condition). `[liv
 ## Charter
 
 - **Mode detection is non-negotiable.** Wrong mode = wrong index = wrong embeddings vs digests.
-- **Silent failures are the threat.** "We didn't crash" passes a unit test but a user sees a broken `/digest:show`. Every scenario that touches user-visible surfaces must have a probe that proves the right thing happened.
+- **Silent failures are the threat.** "We didn't crash" passes a unit test but a user sees a broken `/session:digest`. Every scenario that touches user-visible surfaces must have a probe that proves the right thing happened.
 - **Real Pi process, real model.** Digest LLM calls go through `claude-bridge` against a cheap-class model (haiku) so generation actually fires.
 - **Isolated HOME per scenario.** Each scenario runs against a fresh `~/.pi/session-search/` (set via `scn_setup_clean_home`) so digest files, indexes, and configs don't leak between runs.
 
@@ -28,16 +28,16 @@ Tags: `[ci]` = CI-safe (no live model access required for pass condition). `[liv
 
 - **S01** `[ci]` — **fts-raw mode loads cleanly when no embedder configured.** Empty `~/.pi/session-search/`. Pi starts. Assert: extension loaded, no notify error, mode is fts-raw (no embedder warning).
 - **S02** `[ci]` — **Misconfigured-verdict UX (5 sub-tests, continued-on-failure).** 5 independent sub-tests each with its own pi instance:
-  - (a) embedder set, digest absent → status set, error notify, `session_search`/`/find-session` return remediation, `/session-embeddings-setup` and `/digest:settings` work normally.
+  - (a) embedder set, digest absent → status set, error notify, `session_search`/`/find-session` return remediation, `/session:embedder` and `/session:summarizer` work normally.
   - (b) digest set, embedder absent → symmetric checks with opposite missing field.
   - (c) both broken (legacy bedrock embedder + digest configured but no model) → `missing: "both"` notify mentions both files.
   - (d) warm-path transition. Start digest-hybrid, edit config to remove `digest.json`, `/reload`, assert status updates and prior tool invocations return remediation.
   - (e) legacy-bedrock + no-digest-intent → legacy-rejection notify fires; verdict resolves to `fts-raw`; `session_search` works as normal fts-raw search (NOT misconfigured).
   Sub-tests run sequentially but each sets up its own independent `PI_SESSION_SEARCH_HOME`. Assertions capture pass/fail per sub-test; final exit reports per-sub-test status.
-- **S08** `[ci]` — **`/digest:settings` creates global config.** Empty HOME. Run `/digest:settings`. Assert: `~/.pi/session-search/digest.json` now exists with defaults. Pane shows path + `/reload` instruction.
-- **S09** `[ci]` — **`/digest:show` with no digest yet shows fallback.** Pi just started, no digest written. Run `/digest:show`. Assert pane: `(no digest yet)`.
-- **S19** `[ci]` — **Legacy embedder config (`type: "bedrock"`) is refused with notify.** Write `config.json` with `embedder.type = "bedrock"` (legacy). Pi starts. Assert pane notify: "legacy embedder" / "/session-embeddings-setup". Mode detected: fts-raw (fallback).
-- **S20** `[ci]` — **Index v3 → v4 reset on load.** Pre-place a `~/.pi/session-search/index/session-index.json` with `version: 3`. Pi starts. Assert: file rewritten to `version: 4`; pane notify "incompatible; reset to v4. Run /digest:backfill".
+- **S08** `[ci]` — **`/session:summarizer` creates global config.** Empty HOME. Run `/session:summarizer`. Assert: `~/.pi/session-search/digest.json` now exists with defaults. Pane shows path + `/reload` instruction.
+- **S09** `[ci]` — **`/session:digest` with no digest yet shows fallback.** Pi just started, no digest written. Run `/session:digest`. Assert pane: `(no digest yet)`.
+- **S19** `[ci]` — **Legacy embedder config (`type: "bedrock"`) is refused with notify.** Write `config.json` with `embedder.type = "bedrock"` (legacy). Pi starts. Assert pane notify: "legacy embedder" / "/session:embedder". Mode detected: fts-raw (fallback).
+- **S20** `[ci]` — **Index v3 → v4 reset on load.** Pre-place a `~/.pi/session-search/index/session-index.json` with `version: 3`. Pi starts. Assert: file rewritten to `version: 4`; pane notify "incompatible; reset to v4. Run /session:backfill".
 - **S21 slot** `[ci]` — **(reserved for migration scenario — TBD).** The old hybrid-raw→digest-mode upgrade scenario has been deleted. A new migration scenario covering INDEX_VERSION 4→5 wipe, FTS rebuild, and notify text selection will be authored in this slot.
 
 ### Live-model scenarios (manual smoke for Release)
@@ -52,14 +52,14 @@ Lifecycle and digest generation:
 
 Slash commands:
 
-- **S10** `[live-model]` — **`/digest:update` after a turn writes digest + setSessionName.** Send a turn. Run `/digest:update`. Assert: digest file written. Pane notify: success message.
-- **S11** `[live-model]` — **`/digest:rewrite` forces full re-summarize.** Have a digest. Run `/digest:rewrite`. Assert: digest file mtime updated; new digest body differs from prior.
-- **S12** `[live-model]` — **`/digest:backfill --dry-run` prints cost estimate.** Place 2-3 fixture session JSONLs. Run `/digest:backfill --dry-run`. Assert pane: cost lines printed.
+- **S10** `[live-model]` — **`/session:update` after a turn writes digest + setSessionName.** Send a turn. Run `/session:update`. Assert: digest file written. Pane notify: success message.
+- **S11** `[live-model]` — **`/session:rewrite` forces full re-summarize.** Have a digest. Run `/session:rewrite`. Assert: digest file mtime updated; new digest body differs from prior.
+- **S12** `[live-model]` — **`/session:backfill --dry-run` prints cost estimate.** Place 2-3 fixture session JSONLs. Run `/session:backfill --dry-run`. Assert pane: cost lines printed.
 
 Render layer:
 
-- **S13** `[live-model]` — **`session_list` in digest-hybrid shows headlines for digested + suffix for un-digested.** Set up digest-hybrid. Pre-place fixtures. Send "list my sessions". Assert pane: headline for digested, `(no digest — run /digest:update)` for un-digested.
-- **S14** `[live-model]` — **`session_search` empty-state in digest-hybrid.** Empty index in digest-hybrid. Send "search sessions for foo". Assert pane: "Run /digest:backfill" message.
+- **S13** `[live-model]` — **`session_list` in digest-hybrid shows headlines for digested + suffix for un-digested.** Set up digest-hybrid. Pre-place fixtures. Send "list my sessions". Assert pane: headline for digested, `(no digest — run /session:update)` for un-digested.
+- **S14** `[live-model]` — **`session_search` empty-state in digest-hybrid.** Empty index in digest-hybrid. Send "search sessions for foo". Assert pane: "Run /session:backfill" message.
 - **S15** `[live-model]` — **primer `before_agent_start` shows digest.headline.** Set up two old sessions, one with digest. Send any turn. Assert model response references headline content.
 - **S16** `[live-model]` — **`session_search` results in digest-hybrid show topics line.** Place a fixture digest with topics. Search for matching keyword. Assert pane: `Topics: foo, bar` line.
 
@@ -100,7 +100,7 @@ Use `--ci-only` on CI. Run full suite before tagging.
 What IS verified by the current runner:
 - Pi launches with the local extension
 - Extension loads cleanly in fts-raw mode (S01 — PASS)
-- All structural assertions before the first model call (no error notifications, file paths exist, config files written by `/digest:settings`)
+- All structural assertions before the first model call (no error notifications, file paths exist, config files written by `/session:summarizer`)
 - Slash-command-only scenarios that don't require model output (S08, S09, S19, S20)
 
 What's blocked:

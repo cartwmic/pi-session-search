@@ -22,7 +22,7 @@ The active mode is **auto-detected** from your configuration — no toggle neede
 | `fts-raw` | No embedder configured | FTS5 over raw user messages |
 | `digest-hybrid` | Embedder + resolvable digest model | Cosine over digest-body embeddings + BM25 over (digest body, raw content) |
 
-**Misconfigured verdict**: if exactly one of embedder / digest model is configured (partial config), the extension enters a misconfigured state with a pinned status error and a remediation notify. Search and digest tools return the remediation message instead of executing. Recovery commands (`/session-embeddings-setup`, `/digest:settings`) remain available in all states.
+**Misconfigured verdict**: if exactly one of embedder / digest model is configured (partial config), the extension enters a misconfigured state with a pinned status error and a remediation notify. Search and digest tools return the remediation message instead of executing. Recovery commands (`/session:embedder`, `/session:summarizer`) remain available in all states.
 
 ## Install
 
@@ -44,7 +44,7 @@ Requires **Node 22.5+** (`node:sqlite` is used for FTS5). Node 24+ is recommende
 
 ### Embedder (optional — enables hybrid search)
 
-Run `/session-embeddings-setup` in pi. The wizard asks four questions:
+Run `/session:embedder` in pi. The wizard asks four questions:
 
 1. **Base URL** — e.g. `https://api.openai.com` (default)
 2. **Model** — e.g. `text-embedding-3-small`
@@ -81,9 +81,9 @@ Requires an embedder to be configured first. The digest builder auto-detects a c
 }
 ```
 
-All fields except `provider`/`model` are optional (shown with defaults). Run `/digest:settings` to create the file with defaults in place.
+All fields except `provider`/`model` are optional (shown with defaults). Run `/session:summarizer` to create the file with defaults in place.
 
-After setup, run `/digest:backfill` to digest historical sessions. New sessions are digested live with a 60-second debounce after each agent turn.
+After setup, run `/session:backfill` to digest historical sessions. New sessions are digested live with a 60-second debounce after each agent turn.
 
 ## Usage
 
@@ -118,20 +118,20 @@ Opens a scrollable card overlay. Select a card to switch to that session.
 
 | Command | Description |
 |---------|-------------|
-| `/session-embeddings-setup` | Configure the embedder (flat 4-prompt walkthrough) |
-| `/session-sync` | Force an immediate incremental re-sync |
-| `/session-reindex` | Force a full re-index of all sessions |
+| `/session:embedder` | Configure the embedding model for search (flat 4-prompt walkthrough) |
+| `/session:sync` | Force an immediate incremental re-sync |
+| `/session:reindex` | Force a full re-index of all sessions |
 
 ### Digest
 
 | Command | Description |
 |---------|-------------|
-| `/digest:settings` | Show the effective config; create `digest.json` with defaults if absent |
-| `/digest:show` | Show the current session's stored digest |
-| `/digest:update` | Trigger an immediate digest write for the current session |
-| `/digest:rewrite` | Force a full re-summarize (ignores prior digest) |
-| `/digest:backfill` | Digest all historical sessions that lack a digest |
-| `/digest:cost` | Show LLM token and cost usage for this process |
+| `/session:summarizer` | Configure the digest LLM model interactively; creates `digest.json` if absent |
+| `/session:digest` | Show the current session's stored digest |
+| `/session:update` | Trigger an immediate digest write for the current session |
+| `/session:rewrite` | Force a full re-summarize (ignores prior digest) |
+| `/session:backfill` | Digest all historical sessions that lack a digest |
+| `/session:cost` | Show LLM token and cost usage for this process |
 
 ### Session picker
 
@@ -230,11 +230,11 @@ The upstream embedder shipped four provider-specific code paths. This fork colla
 - The OpenAI-native class, the AWS-SDK-backed Titan path, and two endpoint-compatible classes have all been removed.
 - The AWS SDK peer dependencies (`@aws-sdk/*`) are removed; the AWS-SDK-backed embedding path was their only consumer.
 - Any provider whose embedding endpoint speaks the OpenAI `/v1/embeddings` format can be reached by setting `baseUrl` in the flat embedder config (see **Setup** above).
-- The `EmbedderConfig` no longer carries a `type` discriminator. If your existing `config.json` has `"type": "openai-compatible"`, the field is silently ignored. Any other `type` value triggers a one-time warning and disables the embedder until you re-run `/session-embeddings-setup`.
+- The `EmbedderConfig` no longer carries a `type` discriminator. If your existing `config.json` has `"type": "openai-compatible"`, the field is silently ignored. Any other `type` value triggers a one-time warning and disables the embedder until you re-run `/session:embedder`.
 
 ### Index version bump
 
-`INDEX_VERSION` moved from 3 to 4. Existing v3 index entries are discarded on load. Run `/digest:backfill` post-upgrade to rebuild.
+`INDEX_VERSION` moved from 3 to 4. Existing v3 index entries are discarded on load. Run `/session:backfill` post-upgrade to rebuild.
 
 ### No merge compatibility
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario S13 — session_list in digest-hybrid: headline for digested session,
-# "(no digest — run /digest:update)" suffix for un-digested session.
+# "(no digest — run /session:update)" suffix for un-digested session.
 #
 # Goal: Prove that the session_list tool render branch distinguishes between
 # sessions that have a stored digest (shows headline) and sessions that don't
@@ -85,7 +85,7 @@ sleep 2
 
 # ─── Turn: ask for session list ───────────────────────────────────────────────
 # The model should call session_list. Tool result contains both headline (for
-# session A) and "(no digest — run /digest:update)" suffix (for session B).
+# session A) and "(no digest — run /session:update)" suffix (for session B).
 scn_send "list my sessions"
 
 echo "==== S13 results ===="

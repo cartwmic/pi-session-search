@@ -1,5 +1,5 @@
 /**
- * Backfill helpers for /digest:backfill and /digest:backfill --dry-run.
+ * Backfill helpers for /session:backfill and /session:backfill --dry-run.
  *
  * Extracted from src/index.ts to keep command handler code readable.
  * Called by Phase-8 slash commands; NOT a lifecycle module.

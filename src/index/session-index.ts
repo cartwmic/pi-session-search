@@ -489,7 +489,7 @@ export class SessionIndex {
             this.data.lastMode = this.mode;
             this.save();
             onNotify?.(
-              `session-search: mode changed (${previousMode} → ${this.mode}); ${cleared} embeddings cleared. Run /digest:backfill to re-populate.`,
+              `session-search: mode changed (${previousMode} → ${this.mode}); ${cleared} embeddings cleared. Run /session:backfill to re-populate.`,
               "info",
             );
           }
@@ -537,7 +537,7 @@ export class SessionIndex {
         }
 
         onNotify?.(
-          `session-search: index version ${oldVersion} is incompatible; reset to v4. Run /digest:backfill to repopulate.`,
+          `session-search: index version ${oldVersion} is incompatible; reset to v4. Run /session:backfill to repopulate.`,
           "info",
         );
       }

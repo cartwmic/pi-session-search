@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Scenario S08 — /digest:settings creates global config
+# Scenario S08 — /session:summarizer creates global config
 #
-# Goal: Catches regressions where /digest:settings fails to write digest.json
+# Goal: Catches regressions where /session:summarizer fails to write digest.json
 #       or where the success notify omits the path / reload instruction.
 
 set -euo pipefail
@@ -15,12 +15,12 @@ trap 'scn_pi_stop' EXIT
 # Empty HOME — digest.json must NOT exist before the command runs.
 scn_setup_clean_home "s08"
 
-# fts-raw mode is fine here: /digest:settings does not check resolvedDigestModel.
+# fts-raw mode is fine here: /session:summarizer does not check resolvedDigestModel.
 scn_pi_start_session_search
 
 # Send the slash command.  No LLM call fires, so we poll the pane directly
 # rather than relying on a bridge log event.
-"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:settings"
+"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:summarizer"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 
 # Handler emits: "Digest config created at <path>. Edit it then run /reload to activate."
@@ -31,7 +31,7 @@ echo "==== S08 results ===="
 
 scn_assert_file_exists \
     "$SCN_TEMP_HOME/digest.json" \
-    "S08: digest.json created by /digest:settings"
+    "S08: digest.json created by /session:summarizer"
 
 scn_assert_pane_contains \
     "[Rr]eload|digest\.json" \

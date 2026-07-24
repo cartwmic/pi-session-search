@@ -21,7 +21,7 @@ clarify artifact's inconsistency + completeness passes.
   into the in-flight call; aborting it kills the underlying claude-p process group.
 - **Reaper** — a lifecycle hook (`session_shutdown`, `deactivate`, `dispose`)
   that aborts the in-flight call during teardown/transition.
-- **Supersession** — a newer digest trigger (e.g. `/digest:update`) aborting and
+- **Supersession** — a newer digest trigger (e.g. `/session:update`) aborting and
   replacing an in-flight call instead of waiting on it.
 - **Coalescing/debounce** — functional scheduling: the 250ms follow-up tail and
   the configurable debounce window that batch rapid triggers.

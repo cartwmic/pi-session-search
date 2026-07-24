@@ -71,7 +71,7 @@ When the resolver returns `undefined` AND `digestRequested === true` (see `diges
 - **THEN** the resolver returns `undefined` AFTER the bounded retry
 - **AND** the mode-resolution verdict is `misconfigured` with `missing: "digest"`
 - **AND** search/digest commands and tools have verdict-aware bodies that return the remediation message on invocation
-- **AND** `/session-embeddings-setup` and `/digest:settings` work normally (they ARE the recovery affordance)
+- **AND** `/session:embedder` and `/session:summarizer` work normally (they ARE the recovery affordance)
 - **AND** the extension sets a persistent error status line and emits ONE error notify per `session_start` (see `session-indexing` Mode auto-detection requirement)
 
 #### Scenario: Registry populates within retry window → verdict transitions to digest-hybrid silently
@@ -171,16 +171,16 @@ The system SHALL trigger digest updates on the following events:
 
 - `agent_end` — debounced by `debounceSeconds` (default `60`) per session.
 - `session_compact` — immediate (no debounce); the compaction event materially changes the conversation shape.
-- The `/digest:update` slash command — immediate, bypassing debounce.
-- The `/digest:rewrite` slash command — immediate, forcing full re-summarize regardless of threshold.
-- The `/digest:backfill` slash command — processes all sessions without a current digest, sequentially.
+- The `/session:update` slash command — immediate, bypassing debounce.
+- The `/session:rewrite` slash command — immediate, forcing full re-summarize regardless of threshold.
+- The `/session:backfill` slash command — processes all sessions without a current digest, sequentially.
 
-The lifecycle SHALL NOT trigger automatic digest updates on `session_start`. Backfill of historical sessions is opt-in via `/digest:backfill` only.
+The lifecycle SHALL NOT trigger automatic digest updates on `session_start`. Backfill of historical sessions is opt-in via `/session:backfill` only.
 
 Only one digest LLM call may be in flight per session at a time (domain invariant 1). Concurrency between triggers SHALL be resolved by one of two caller-driven strategies, and never by a wall-clock deadline (domain invariant 4):
 
 - **Coalescing (automatic triggers):** WHEN an `agent_end` or `session_compact` trigger fires WHILE a digest call is in flight, THE system SHALL mark the lifecycle dirty and return without issuing a parallel call; when the in-flight call settles, exactly one follow-up SHALL be scheduled after the coalescing tail delay if dirty (the most recent trigger wins; intermediate triggers discarded).
-- **Supersession (slash-command triggers):** WHEN a `/digest:update` or `/digest:rewrite` trigger fires WHILE a digest call is in flight, THE system SHALL abort the in-flight call via `currentAbort`, clear `pendingCall`, and then fire the new digest immediately — it SHALL NOT wait on the in-flight call.
+- **Supersession (slash-command triggers):** WHEN a `/session:update` or `/session:rewrite` trigger fires WHILE a digest call is in flight, THE system SHALL abort the in-flight call via `currentAbort`, clear `pendingCall`, and then fire the new digest immediately — it SHALL NOT wait on the in-flight call.
 
 #### Scenario: Debounce prevents rapid-fire LLM calls
 
@@ -199,7 +199,7 @@ Only one digest LLM call may be in flight per session at a time (domain invarian
 - **WHEN** the extension loads on `session_start` with `reason: "startup"`
 - **AND** the index contains 100 sessions without digests
 - **THEN** no digest LLM calls are made
-- **AND** the user must invoke `/digest:backfill` to digest those sessions
+- **AND** the user must invoke `/session:backfill` to digest those sessions
 
 #### Scenario: Automatic trigger while pending coalesces
 
@@ -210,7 +210,7 @@ Only one digest LLM call may be in flight per session at a time (domain invarian
 #### Scenario: Slash command supersedes an in-flight call
 
 - **WHEN** a digest call is in flight (`pendingCall` is true)
-- **AND** the user invokes `/digest:update`
+- **AND** the user invokes `/session:update`
 - **THEN** the in-flight call's `currentAbort` is aborted and `pendingCall` is cleared
 - **AND** a new digest call is fired immediately without waiting on a deadline
 - **AND** the persisted digest returned reflects the new call
@@ -218,7 +218,7 @@ Only one digest LLM call may be in flight per session at a time (domain invarian
 #### Scenario: Slash command kills a wedged in-flight call
 
 - **WHEN** a previous digest call is wedged (never returning) with `pendingCall` true
-- **AND** the user invokes `/digest:update`
+- **AND** the user invokes `/session:update`
 - **THEN** the wedged call is aborted via `currentAbort` (killing the underlying process group)
 - **AND** the new digest proceeds instead of the command hanging on a timer
 
@@ -294,9 +294,9 @@ The on-disk digest file SHALL be the source of truth on extension reload — the
 - **THEN** the on-disk file is either the prior valid digest or the new valid digest
 - **AND** no partially-written JSON is observable
 
-#### Scenario: /digest:rewrite replaces the on-disk file
+#### Scenario: /session:rewrite replaces the on-disk file
 
-- **WHEN** the user runs `/digest:rewrite` on a session with an existing digest
+- **WHEN** the user runs `/session:rewrite` on a session with an existing digest
 - **THEN** a new LLM call runs with the full re-summarize prompt
 - **AND** the new digest atomically replaces the on-disk file
 - **AND** the index is updated to embed the new `digest.body`
@@ -305,18 +305,18 @@ The on-disk digest file SHALL be the source of truth on extension reload — the
 
 The system SHALL accumulate per-session-since-startup cost data: number of LLM calls, total input/output tokens, total USD cost broken down by input / output / cache-read / cache-write.
 
-The `/digest:cost` command SHALL render this as a single notification line including the resolved model name.
+The `/session:cost` command SHALL render this as a single notification line including the resolved model name.
 
-#### Scenario: /digest:cost reports zero before any calls
+#### Scenario: /session:cost reports zero before any calls
 
 - **WHEN** the extension has just loaded and no digest LLM calls have been made
-- **AND** the user runs `/digest:cost`
+- **AND** the user runs `/session:cost`
 - **THEN** the command shows `0 calls | tokens: 0→0 | cost: $0`
 
-#### Scenario: /digest:cost reflects accumulated usage
+#### Scenario: /session:cost reflects accumulated usage
 
 - **WHEN** the lifecycle has triggered 3 successful digest writes totaling 1500 input + 200 output tokens at $0.0042 total
-- **AND** the user runs `/digest:cost`
+- **AND** the user runs `/session:cost`
 - **THEN** the command shows `3 calls | tokens: 1500→200 | cost: $0.0042`
 - **AND** the line includes the resolved model name (e.g. `openai-codex/gpt-5.4-nano`)
 
@@ -397,7 +397,7 @@ interface DigestConfig {
 }
 ```
 
-The `/digest:settings` slash command SHALL create the global file with defaults if it does not exist, and notify the user with the file path and a reminder to run `/reload`.
+The `/session:summarizer` slash command SHALL create the global file with defaults if it does not exist, and notify the user with the file path and a reminder to run `/reload`.
 
 Config SHALL reload on `session_start` events.
 
@@ -407,10 +407,10 @@ Config SHALL reload on `session_start` events.
 - **AND** project config at `<cwd>/.pi/session-search/digest.json` sets `debounceSeconds: 30`
 - **THEN** the effective `debounceSeconds` for sessions in that cwd is `30`
 
-#### Scenario: /digest:settings creates default file
+#### Scenario: /session:summarizer creates default file
 
 - **WHEN** `~/.pi/session-search/digest.json` does not exist
-- **AND** the user runs `/digest:settings`
+- **AND** the user runs `/session:summarizer`
 - **THEN** the file is created with the default config
 - **AND** the user is notified of the path
 

@@ -25,7 +25,7 @@ session_search(query="setting up CI pipeline for Nessie")
 ### session_list
 Browse sessions with filters. Good for time-based queries or project-specific browsing.
 
-In digest-hybrid mode, listed sessions show `digest.headline` when available; un-digested sessions fall back to a truncated first user message with a `(no digest — run /digest:update)` suffix.
+In digest-hybrid mode, listed sessions show `digest.headline` when available; un-digested sessions fall back to a truncated first user message with a `(no digest — run /session:update)` suffix.
 
 ```
 session_list(project="Rosie")                    # Sessions in the Rosie project
@@ -49,15 +49,15 @@ session_read(session="...", include_tools=true)             # Include tool call 
 | Command | Description |
 |---------|-------------|
 | `/find-session [query]` | Open the interactive session search overlay; select a card to switch to that session |
-| `/session-embeddings-setup` | Configure the embedder for hybrid/digest search |
-| `/session-sync` | Force an immediate incremental re-sync |
-| `/session-reindex` | Force a full re-index of all sessions |
-| `/digest:settings` | Show config; create `~/.pi/session-search/digest.json` with defaults if absent |
-| `/digest:show` | Show the current session's stored digest |
-| `/digest:update` | Trigger an immediate digest write for the current session |
-| `/digest:rewrite` | Force a full re-summarize (ignores prior digest) |
-| `/digest:backfill` | Digest all historical sessions that lack a digest |
-| `/digest:cost` | Show LLM token and cost usage for this process |
+| `/session:embedder` | Configure the embedder for hybrid/digest search |
+| `/session:sync` | Force an immediate incremental re-sync |
+| `/session:reindex` | Force a full re-index of all sessions |
+| `/session:summarizer` | Show config; create `~/.pi/session-search/digest.json` with defaults if absent |
+| `/session:digest` | Show the current session's stored digest |
+| `/session:update` | Trigger an immediate digest write for the current session |
+| `/session:rewrite` | Force a full re-summarize (ignores prior digest) |
+| `/session:backfill` | Digest all historical sessions that lack a digest |
+| `/session:cost` | Show LLM token and cost usage for this process |
 
 ## Workflow
 
@@ -68,9 +68,9 @@ session_read(session="...", include_tools=true)             # Include tool call 
 
 ## Setup
 
-Run `/session-embeddings-setup` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/digest:settings` and `/digest:backfill` to enable digest-hybrid mode for best recall.
+Run `/session:embedder` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/session:summarizer` and `/session:backfill` to enable digest-hybrid mode for best recall.
 
-To force a full re-index, run `/session-reindex`.
+To force a full re-index, run `/session:reindex`.
 
 ## What Gets Indexed
 
@@ -85,4 +85,4 @@ To force a full re-index, run `/session-reindex`.
 - Session search is best for semantic queries; session list is best for "show me recent sessions" or "what did we work on in project X"
 - For very long sessions, use `session_read` with pagination (`offset`/`limit`)
 - Set `include_tools=true` on `session_read` when you need to see the actual tool outputs (verbose)
-- Run `/digest:backfill` after first setup to digest historical sessions; new sessions are digested live automatically
+- Run `/session:backfill` after first setup to digest historical sessions; new sessions are digested live automatically

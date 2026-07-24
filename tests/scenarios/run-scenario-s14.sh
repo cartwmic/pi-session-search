@@ -2,7 +2,7 @@
 # Scenario S14 — session_search in digest-hybrid shows digest-specific behavior,
 # not the legacy fts-raw rendering.
 #
-# Original goal: verify the empty-state message ("Run /digest:backfill") fires.
+# Original goal: verify the empty-state message ("Run /session:backfill") fires.
 # Reality: pi-session-search discovers sessions from $HOME/.pi/agent/sessions/
 # (the user's REAL session dir), which PI_SESSION_SEARCH_HOME does not isolate.
 # So the index is rarely truly empty in any realistic scenario test.

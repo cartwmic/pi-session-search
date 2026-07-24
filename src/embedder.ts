@@ -50,7 +50,7 @@ export function createEmbedder(
     if (raw.type !== "openai-compatible") {
       notify?.(
         `session-search: legacy embedder type '${raw.type}' is no longer supported. ` +
-          `Run /session-embeddings-setup to reconfigure with a /v1/embeddings-compatible ` +
+          `Run /session:embedder to reconfigure with a /v1/embeddings-compatible ` +
           `endpoint (e.g., LiteLLM proxy).`,
         "error"
       );

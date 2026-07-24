@@ -225,7 +225,7 @@ let currentRollup: CostRollup = emptyRollup();
 		// Step 8: migration notify resolver (post-verdict — task 2.4a)
 		if (migrationMeta.didMigrate) {
 			ctx.ui.notify(
-				`session-search: index version ${migrationMeta.migratedFrom} is incompatible; reset to v4. Run /digest:backfill to repopulate.`,
+				`session-search: index version ${migrationMeta.migratedFrom} is incompatible; reset to v4. Run /session:backfill to repopulate.`,
 				"info",
 			);
 		}
@@ -379,11 +379,11 @@ let currentRollup: CostRollup = emptyRollup();
 	});
 
 	// ──────────────────────────────────────────────────────────────────────────
-	// Slash commands — /digest:*
+	// Slash commands — /session:*
 	// ──────────────────────────────────────────────────────────────────────────
 
-	// ── 8.1 /digest:settings (task 2.8 — recovery command, no short-circuit) ──
-	pi.registerCommand("digest:settings", {
+	// ── 8.1 /session:summarizer (task 2.8 — recovery command, no short-circuit) ──
+	pi.registerCommand("session:summarizer", {
 		description:
 			"Configure session-digest model interactively",
 		handler: async (_args, ctx) => {
@@ -410,7 +410,7 @@ let currentRollup: CostRollup = emptyRollup();
 				if (!currentConfig?.embedder) {
 					ctx.ui.notify(
 						"Warning: digest-hybrid mode also requires an embedder. " +
-							"Run /session-embeddings-setup to configure semantic search, " +
+							"Run /session:embedder to configure semantic search, " +
 							"or remove digest.json to stay in fts-raw mode.",
 						"warning",
 					);
@@ -446,7 +446,7 @@ let currentRollup: CostRollup = emptyRollup();
 				if (!currentConfig?.embedder) {
 					ctx.ui.notify(
 						"Warning: digest-hybrid mode also requires an embedder. " +
-							"Run /session-embeddings-setup to configure semantic search, " +
+							"Run /session:embedder to configure semantic search, " +
 							"or remove digest.json to stay in fts-raw mode.",
 						"warning",
 					);
@@ -455,8 +455,8 @@ let currentRollup: CostRollup = emptyRollup();
 		},
 	});
 
-	// ── 8.2 /digest:update (task 2.7 — check verdict) ───────────────────────
-	pi.registerCommand("digest:update", {
+	// ── 8.2 /session:update (task 2.7 — check verdict) ───────────────────────
+	pi.registerCommand("session:update", {
 		description:
 			"Generate/update the digest for the current session immediately (bypasses debounce)",
 		handler: async (_args, ctx) => {
@@ -466,7 +466,7 @@ let currentRollup: CostRollup = emptyRollup();
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
-					"Digest mode unavailable: not in digest-hybrid mode. Run /digest:settings to configure.",
+					"Digest mode unavailable: not in digest-hybrid mode. Run /session:summarizer to configure.",
 					"warning",
 				);
 				return;
@@ -495,8 +495,8 @@ let currentRollup: CostRollup = emptyRollup();
 		},
 	});
 
-	// ── 8.3 /digest:show (task 2.7 — check verdict) ─────────────────────────
-	pi.registerCommand("digest:show", {
+	// ── 8.3 /session:digest (task 2.7 — check verdict) ─────────────────────────
+	pi.registerCommand("session:digest", {
 		description: "Print the current session's digest",
 		handler: async (_args, ctx) => {
 			if (currentVerdict?.kind === "misconfigured") {
@@ -524,8 +524,8 @@ let currentRollup: CostRollup = emptyRollup();
 		},
 	});
 
-	// ── 8.4 /digest:rewrite (task 2.7 — check verdict) ──────────────────────
-	pi.registerCommand("digest:rewrite", {
+	// ── 8.4 /session:rewrite (task 2.7 — check verdict) ──────────────────────
+	pi.registerCommand("session:rewrite", {
 		description:
 			"Force full re-summarize of the current session digest regardless of token threshold",
 		handler: async (_args, ctx) => {
@@ -535,7 +535,7 @@ let currentRollup: CostRollup = emptyRollup();
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
-					"Digest mode unavailable: not in digest-hybrid mode. Run /digest:settings to configure.",
+					"Digest mode unavailable: not in digest-hybrid mode. Run /session:summarizer to configure.",
 					"warning",
 				);
 				return;
@@ -561,9 +561,9 @@ let currentRollup: CostRollup = emptyRollup();
 		},
 	});
 
-	// ── 8.5 / 8.6 / 8.7 /digest:backfill [--dry-run | --regen] (task 2.7) ──
+	// ── 8.5 / 8.6 / 8.7 /session:backfill [--dry-run | --regen] (task 2.7) ──
 	// Also task 2.6: generation guard for long-running commands.
-	pi.registerCommand("digest:backfill", {
+	pi.registerCommand("session:backfill", {
 		description:
 			"Generate digests for un-digested historical sessions. " +
 			"Flags: --dry-run (cost estimate only), --regen (overwrite all existing digests)",
@@ -576,7 +576,7 @@ let currentRollup: CostRollup = emptyRollup();
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
-					"Backfill requires digest-hybrid mode. Run /digest:settings to configure.",
+					"Backfill requires digest-hybrid mode. Run /session:summarizer to configure.",
 					"warning",
 				);
 				return;
@@ -596,7 +596,7 @@ let currentRollup: CostRollup = emptyRollup();
 			// Resolve digest model for backfill
 			const backfillModel = resolveModel(digestConfig, ctx.modelRegistry.getAvailable());
 			if (!backfillModel) {
-				ctx.ui.notify("No digest model available for backfill. Run /digest:settings to configure.", "error");
+				ctx.ui.notify("No digest model available for backfill. Run /session:summarizer to configure.", "error");
 				return;
 			}
 
@@ -621,7 +621,7 @@ let currentRollup: CostRollup = emptyRollup();
 			// ── 8.5 / 8.7 Full / regen backfill ──────────────────────────────
 			if (!(sessionIndex instanceof SessionIndex)) {
 				ctx.ui.notify(
-					"Backfill requires a vector index (configure embedder via /session-embeddings-setup).",
+					"Backfill requires a vector index (configure embedder via /session:embedder).",
 					"warning",
 				);
 				return;
@@ -672,8 +672,8 @@ let currentRollup: CostRollup = emptyRollup();
 		},
 	});
 
-	// ── 8.8 /digest:cost (task 2.7 — check verdict) ─────────────────────────
-	pi.registerCommand("digest:cost", {
+	// ── 8.8 /session:cost (task 2.7 — check verdict) ─────────────────────────
+	pi.registerCommand("session:cost", {
 		description: "Show cumulative digest generation cost for this process",
 		handler: async (_args, ctx) => {
 			if (currentVerdict?.kind === "misconfigured") {
@@ -693,11 +693,11 @@ let currentRollup: CostRollup = emptyRollup();
 	});
 
 	// ──────────────────────────────────────────────────────────────────────────
-	// Setup command (8.9) — /session-embeddings-setup
+	// Setup command (8.9) — /session:embedder
 	// Task 2.8: recovery command — does NOT short-circuit on misconfigured.
 	// ──────────────────────────────────────────────────────────────────────────
 
-	pi.registerCommand("session-embeddings-setup", {
+	pi.registerCommand("session:embedder", {
 		description:
 			"Configure semantic embeddings for session search (OpenAI-compatible API)",
 		handler: async (_args, ctx) => {
@@ -788,10 +788,10 @@ let currentRollup: CostRollup = emptyRollup();
 	});
 
 	// ──────────────────────────────────────────────────────────────────────────
-	// 8.10 /session-sync and /session-reindex (task 2.6 generation guard)
+	// 8.10 /session:sync and /session:reindex (task 2.6 generation guard)
 	// ──────────────────────────────────────────────────────────────────────────
 
-	pi.registerCommand("session-sync", {
+	pi.registerCommand("session:sync", {
 		description: "Force an immediate incremental re-sync of the session index",
 		handler: async (_args, ctx) => {
 			if (!sessionIndex) {
@@ -823,7 +823,7 @@ let currentRollup: CostRollup = emptyRollup();
 		},
 	});
 
-	pi.registerCommand("session-reindex", {
+	pi.registerCommand("session:reindex", {
 		description: "Force full re-index of all session files",
 		handler: async (_args, ctx) => {
 			if (!sessionIndex) {
@@ -908,7 +908,7 @@ let currentRollup: CostRollup = emptyRollup();
 				}
 				const msg =
 					currentVerdict?.kind === "digest-hybrid"
-						? "Session index is empty in digest mode. Run /digest:backfill to digest historical sessions, or wait for new sessions to be digested live."
+						? "Session index is empty in digest mode. Run /session:backfill to digest historical sessions, or wait for new sessions to be digested live."
 						: "Session index is empty — it may still be building. Try again in a moment.";
 				return { content: [{ type: "text", text: msg }], details: {} };
 			}
@@ -1050,7 +1050,7 @@ let currentRollup: CostRollup = emptyRollup();
 						} else {
 							name =
 								truncate(s.firstUserMessage, 60) +
-								" (no digest — run /digest:update)";
+								" (no digest — run /session:update)";
 						}
 					} else {
 						name = s.name || truncate(s.firstUserMessage, 60);

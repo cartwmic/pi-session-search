@@ -84,7 +84,7 @@ export function buildSummary(s: ParsedSession, digest?: SessionDigest | null): s
     name = digest.headline;
   } else if (digest === null) {
     // digest-hybrid but no digest yet — canonical fallback (task 6.9)
-    name = truncate(s.firstUserMessage, 80) + " (no digest \u2014 run /digest:update)";
+    name = truncate(s.firstUserMessage, 80) + " (no digest \u2014 run /session:update)";
   } else {
     // undefined = raw mode — existing behavior
     name = s.name || truncate(s.firstUserMessage, 80);

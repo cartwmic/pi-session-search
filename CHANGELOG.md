@@ -23,6 +23,24 @@ Added a process-wide structured logger (pino + `rotating-file-stream`) so SQLite
 
 - `__tests__/digest/config.test.ts` no longer stubs `console.warn`. It now sets `PI_SESSION_SEARCH_LOG_SYNC_FILE` (test-only sync sink, no rotation) and reads records back with `readFileSync`. The logger module exposes `PI_SESSION_SEARCH_LOG_RESET=1` so the cached destination can be rebuilt mid-process.
 
+### Breaking changes — unified `/session:*` command namespace
+
+All slash commands moved to a single `/session:*` namespace with names that describe the specific action. The old `session-*` and `digest:*` names are removed (clean break, no aliases). Rename map:
+
+| Old | New |
+|-----|-----|
+| `/session-embeddings-setup` | `/session:embedder` |
+| `/session-sync` | `/session:sync` |
+| `/session-reindex` | `/session:reindex` |
+| `/digest:settings` | `/session:summarizer` |
+| `/digest:show` | `/session:digest` |
+| `/digest:update` | `/session:update` |
+| `/digest:rewrite` | `/session:rewrite` |
+| `/digest:backfill` | `/session:backfill` |
+| `/digest:cost` | `/session:cost` |
+
+The two config commands are now named for what they configure: `/session:embedder` (embedding model for search) and `/session:summarizer` (digest LLM model). All user-facing notify strings, README, skill docs, and living specs updated to the new names.
+
 ## [3.0.0] — 2026-05-06 — compact mode set (`remove-hybrid-raw-mode`)
 
 ### Breaking changes

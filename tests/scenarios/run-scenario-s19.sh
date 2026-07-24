@@ -49,7 +49,7 @@ sleep 5
 echo "==== S19 results ===="
 
 scn_assert_pane_contains \
-    "[Ss]ession-search.*[Bb]edrock|[Ss]ession-search.*legacy|[Ss]ession-search.*[Ll]egacy|/session-embeddings-setup|legacy.*embedder|no longer supported" \
+    "[Ss]ession-search.*[Bb]edrock|[Ss]ession-search.*legacy|[Ss]ession-search.*[Ll]egacy|/session:embedder|legacy.*embedder|no longer supported" \
     "S19: pane shows legacy-embedder migration notify"
 
 # Pi must still respond — the extension degraded gracefully (fts-raw mode),

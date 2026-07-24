@@ -133,13 +133,13 @@ export interface LifecycleHandle {
 	 * Returns a promise that resolves with the digest (or null on failure)
 	 * once the in-flight + this trigger have settled.
 	 *
-	 * Use this from /digest:update and /digest:rewrite to avoid the slash
+	 * Use this from /session:update and /session:rewrite to avoid the slash
 	 * command racing the auto-digest fired from `agent_end`. Both code paths
 	 * share the same `pendingCall` mutex - the second arrival waits for the
 	 * first to complete instead of issuing a parallel `complete()` call that
 	 * the LLM provider would silently abort.
 	 *
-	 * `forceFull: true` (used by /digest:rewrite) bumps the
+	 * `forceFull: true` (used by /session:rewrite) bumps the
 	 * `convTokensAtLastWrite` anchor down so `buildPrompt` selects full
 	 * mode regardless of accumulated delta.
 	 */
@@ -509,7 +509,7 @@ export function installDigestLifecycle(
 			state.pendingCall = false;
 		}
 
-		// For /digest:rewrite: zero out the anchor so buildPrompt picks full mode
+		// For /session:rewrite: zero out the anchor so buildPrompt picks full mode
 		// regardless of accumulated delta. The threshold check is
 		// `tokensSinceLastWrite >= threshold` which is true when convTokensAtLastWrite=0.
 		if (opts?.forceFull) {

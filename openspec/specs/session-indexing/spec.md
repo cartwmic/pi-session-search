@@ -37,9 +37,9 @@ In `fts-raw` mode the system SHALL preserve upstream pi-session-search semantics
 
 When verdict is `misconfigured`:
 - The extension SHALL NOT instantiate any index.
-- Search/digest commands (`session_search`, `session_list`, `session_read` tools and `/find-session`, `/digest:show`, `/digest:update`, `/digest:rewrite`, `/digest:backfill`, `/digest:cost`) ARE registered at module load (per the registration policy above) but their HANDLERS SHALL re-check `currentVerdict` at invocation time and return the verdict's `notifyMessage` (via `ctx.ui.notify` for commands, via the tool result `content` for tools) without performing any search/digest work.
+- Search/digest commands (`session_search`, `session_list`, `session_read` tools and `/find-session`, `/session:digest`, `/session:update`, `/session:rewrite`, `/session:backfill`, `/session:cost`) ARE registered at module load (per the registration policy above) but their HANDLERS SHALL re-check `currentVerdict` at invocation time and return the verdict's `notifyMessage` (via `ctx.ui.notify` for commands, via the tool result `content` for tools) without performing any search/digest work.
 - The digest lifecycle is installed at module load (one-shot); its event-handler bodies SHALL re-check `currentVerdict` at invocation and skip lifecycle work if not in `digest-hybrid`.
-- The recovery commands `/session-embeddings-setup` and `/digest:settings` ARE registered at module load and their handlers work IN ALL VERDICTS — they edit config files directly without requiring a constructed index or lifecycle. They are the user's slash-command path to fix configuration from inside pi.
+- The recovery commands `/session:embedder` and `/session:summarizer` ARE registered at module load and their handlers work IN ALL VERDICTS — they edit config files directly without requiring a constructed index or lifecycle. They are the user's slash-command path to fix configuration from inside pi.
 - The extension SHALL set a persistent status line via `ctx.ui.setStatus("session-search", verdict.statusLine)` on EVERY `session_start` that resolves misconfigured (not only the first).
 - The extension SHALL emit ONE `ctx.ui.notify(verdict.notifyMessage, "error")` on each `session_start` that resolves misconfigured.
 - A `bootGeneration` counter SHALL increment on every `session_start`. Every async callback (initial sync, status clears, periodic sync, debounced digest writes, in-flight digest completions, embedder fetches) SHALL capture `bootGeneration` at scheduling time and short-circuit if its captured value differs from `currentBootGeneration` at completion. The verdict-assignment step itself (`currentVerdict = await resolveModeVerdict(...)`) SHALL be generation-guarded: if `myGen !== bootGeneration` after the await resolves, the assignment is skipped. Prior `SessionIndex` instances scheduled for replacement SHALL have their in-flight embedder fetches aborted (via `AbortController`) and their `FtsSide` handles closed before the new index is constructed; spec scenario "Warm-path verdict transition does not race with stale upsert" pins this behavior.
@@ -74,7 +74,7 @@ Verdict is computed once per `session_start`. Mid-session config edits without `
 - **AND** the extension sets a persistent status line: `"session-search: misconfigured (no digest model)"`
 - **AND** the extension emits ONE error notify naming `~/.pi/session-search/digest.json` as the file to configure AND `~/.pi/session-search/config.json` as the file to remove for `fts-raw` fallback
 - **AND** search/digest commands and tools are registered at module load BUT their handlers return the remediation message on invocation
-- **AND** the recovery commands `/session-embeddings-setup` and `/digest:settings` ARE registered AND their handlers work normally (not blocked by misconfigured verdict)
+- **AND** the recovery commands `/session:embedder` and `/session:summarizer` ARE registered AND their handlers work normally (not blocked by misconfigured verdict)
 - **AND** no index is instantiated
 - **AND** no sync runs
 
@@ -97,7 +97,7 @@ Verdict is computed once per `session_start`. Mid-session config edits without `
 - **AND** the extension sets a persistent status line: `"session-search: misconfigured (no embedder)"`
 - **AND** the extension emits ONE error notify naming `~/.pi/session-search/config.json` as the file to configure AND `~/.pi/session-search/digest.json` as the file to remove for `fts-raw` fallback
 - **AND** search/digest commands and tools have verdict-aware bodies that return the remediation message on invocation
-- **AND** the recovery commands `/session-embeddings-setup` and `/digest:settings` work normally
+- **AND** the recovery commands `/session:embedder` and `/session:summarizer` work normally
 - **AND** the verdict resolver SHALL NOT retry for `missing: "embedder"` (embedder construction is synchronous)
 
 #### Scenario: Both broken → missing: "both"
@@ -223,7 +223,7 @@ The `session-index.json` v5 schema SHALL include a top-level `vectorDim: number`
 #### Scenario: Per-session digest file is independent of index DB
 
 - **WHEN** the user deletes `~/.pi/session-search/index/` entirely
-- **AND** the user runs `/session-reindex`
+- **AND** the user runs `/session:reindex`
 - **THEN** the indexer reads digests from `~/.pi/session-search/digests/<uuid>.json`
 - **AND** rebuilds both FTS columns and embeddings without re-running any LLM calls
 
@@ -350,7 +350,7 @@ This self-heals interrupted migrations AND manual schema drift (file copy from a
 - **AND** `hybrid-fts.db` is wiped
 - **AND** the user-facing notify is the misconfigured remediation message (NOT the rebuild-promise message, which would lie about something the misconfigured verdict cannot do)
 - **AND** the persistent status line is set to the misconfigured message
-- **AND** the recovery commands `/session-embeddings-setup` and `/digest:settings` are registered so the user can fix their config from inside pi
+- **AND** the recovery commands `/session:embedder` and `/session:summarizer` are registered so the user can fix their config from inside pi
 
 #### Scenario: Legacy digest-mode index is wiped on first v3.0.0 load
 
@@ -442,11 +442,11 @@ The `cosineSimilarity(a, b)` function SHALL throw if `a.length !== b.length`. Mi
 
 ### Requirement: Backfill concurrency control
 
-During `/digest:backfill` execution, the indexes SHALL set `backfillInProgress = true`. The periodic 5-minute `setInterval` `sync()` SHALL check this flag and return immediately without doing work while it is true. `addDigested(..., {batched: true})` SHALL update in-memory state only and defer the `session-index.json` disk write. The backfill loop SHALL call `index.flush()` every 25 successful digests AND on completion to persist the in-memory state.
+During `/session:backfill` execution, the indexes SHALL set `backfillInProgress = true`. The periodic 5-minute `setInterval` `sync()` SHALL check this flag and return immediately without doing work while it is true. `addDigested(..., {batched: true})` SHALL update in-memory state only and defer the `session-index.json` disk write. The backfill loop SHALL call `index.flush()` every 25 successful digests AND on completion to persist the in-memory state.
 
 #### Scenario: Periodic sync skipped during backfill
 
-- **WHEN** `/digest:backfill` is mid-run
+- **WHEN** `/session:backfill` is mid-run
 - **AND** the 5-minute periodic sync timer fires
 - **THEN** the periodic sync returns immediately without parsing files or writing to disk
 

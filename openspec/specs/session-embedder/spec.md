@@ -68,7 +68,7 @@ interface EmbedderConfig {
 }
 ```
 
-The setup command `/session-embeddings-setup` SHALL prompt for `baseUrl`, `model`, and one of `apiKey` or `apiKeyEnv`, with no provider-specific branching.
+The setup command `/session:embedder` SHALL prompt for `baseUrl`, `model`, and one of `apiKey` or `apiKeyEnv`, with no provider-specific branching.
 
 #### Scenario: Config with apiKeyEnv resolves at runtime
 
@@ -88,7 +88,7 @@ The setup command `/session-embeddings-setup` SHALL prompt for `baseUrl`, `model
 
 #### Scenario: Setup command writes config
 
-- **WHEN** the user runs `/session-embeddings-setup`
+- **WHEN** the user runs `/session:embedder`
 - **AND** answers the prompts with `baseUrl: "https://api.together.xyz"`, `model: "togethercomputer/m2-bert-80M-8k-retrieval"`, `apiKey: "tk-x"`
 - **THEN** `~/.pi/session-search/config.json` contains a valid `EmbedderConfig` with those values
 - **AND** the user is told to `/reload` to activate
@@ -115,7 +115,7 @@ The legacy-rejection notify is emitted regardless of which downstream verdict ap
 
 - **WHEN** the loaded `config.json` contains `embedder: {type: "bedrock", profile: "default", region: "us-east-1", model: "amazon.titan-embed-text-v2:0"}`
 - **AND** `digestRequested === false` (no `digest.json` file exists in any scope AND no explicit `provider`/`model` overrides are present in the in-memory digest config)
-- **THEN** `createEmbedder` returns `null` and emits one `ctx.ui.notify("session-search: legacy embedder type 'bedrock' is no longer supported. Run /session-embeddings-setup to reconfigure with a /v1/embeddings-compatible endpoint (e.g., LiteLLM proxy).", "error")`
+- **THEN** `createEmbedder` returns `null` and emits one `ctx.ui.notify("session-search: legacy embedder type 'bedrock' is no longer supported. Run /session:embedder to reconfigure with a /v1/embeddings-compatible endpoint (e.g., LiteLLM proxy).", "error")`
 - **AND** the verdict resolves to `fts-raw`
 - **AND** the extension boots normally in fts-raw with `sessions-fts.db` populated
 
@@ -127,7 +127,7 @@ The legacy-rejection notify is emitted regardless of which downstream verdict ap
 - **AND** the verdict resolves to `misconfigured` with `missing: "embedder"` (if a digest model resolves) OR `missing: "both"` (if no digest model resolves either)
 - **AND** the persistent status line is set to the misconfigured message (matching the verdict's `missing` value)
 - **AND** search/digest commands and tools are registered at module load with verdict-aware bodies that return the remediation message on invocation
-- **AND** the recovery commands `/session-embeddings-setup` and `/digest:settings` are registered AND their handlers work normally
+- **AND** the recovery commands `/session:embedder` and `/session:summarizer` are registered AND their handlers work normally
 
 #### Scenario: createEmbedder runs before verdict resolution
 
@@ -143,8 +143,8 @@ The legacy-rejection notify is emitted regardless of which downstream verdict ap
   1. The legacy-bedrock-rejection notify (from `createEmbedder`).
   2. The misconfigured-verdict remediation notify (from the verdict-resolution path).
 - **AND** ordering is: legacy-rejection notify first, verdict notify second
-- **AND** this stacking is intentional, NOT a bug — the user needs to see both pieces of information; the legacy notify points at `/session-embeddings-setup` while the verdict notify mentions both config files
-- **AND** if the user runs `/session-embeddings-setup` to fix only the embedder, the next `session_start` shows only the verdict notify (now `missing: "digest"`), and the legacy notify does NOT re-fire because the config file is no longer using the legacy `type` field
+- **AND** this stacking is intentional, NOT a bug — the user needs to see both pieces of information; the legacy notify points at `/session:embedder` while the verdict notify mentions both config files
+- **AND** if the user runs `/session:embedder` to fix only the embedder, the next `session_start` shows only the verdict notify (now `missing: "digest"`), and the legacy notify does NOT re-fire because the config file is no longer using the legacy `type` field
 
 ### Requirement: Removed providers and dependencies
 
@@ -152,7 +152,7 @@ The system SHALL NOT ship bedrock-specific, mistral-specific, or ollama-specific
 
 The `package.json` `optionalDependencies` SHALL NOT include `@aws-sdk/client-bedrock-runtime` or `@aws-sdk/credential-providers`.
 
-The `/session-embeddings-setup` command SHALL NOT contain provider-selection branches for bedrock / mistral / ollama. (Users wanting those endpoints configure them via the openai-compatible config with appropriate `baseUrl` — and in the case of Bedrock, via a LiteLLM proxy.)
+The `/session:embedder` command SHALL NOT contain provider-selection branches for bedrock / mistral / ollama. (Users wanting those endpoints configure them via the openai-compatible config with appropriate `baseUrl` — and in the case of Bedrock, via a LiteLLM proxy.)
 
 #### Scenario: No AWS SDK in dependency tree
 
@@ -161,7 +161,7 @@ The `/session-embeddings-setup` command SHALL NOT contain provider-selection bra
 
 #### Scenario: Setup has no provider menu
 
-- **WHEN** the user runs `/session-embeddings-setup`
+- **WHEN** the user runs `/session:embedder`
 - **THEN** the prompts are limited to `baseUrl`, `model`, `apiKey` / `apiKeyEnv`, optional `dimensions`, optional extra session/archive directories
 - **AND** there is no "select provider: openai / mistral / bedrock / ollama / openai-compatible" menu
 

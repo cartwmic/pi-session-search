@@ -51,13 +51,13 @@ export function record(
 }
 
 /**
- * Format a rollup as a one-line string for /digest:cost display.
+ * Format a rollup as a one-line string for /session:cost display.
  * Includes "this process" wording to clarify the scope.
  */
 export function format(rollup: CostRollup, modelName: string): string {
 	const total = rollup.cost.total.toFixed(4);
 	return (
-		`[digest:cost] this process — model: ${modelName} | ` +
+		`[session:cost] this process — model: ${modelName} | ` +
 		`calls: ${rollup.calls} | ` +
 		`tokens in: ${rollup.tokensIn} / out: ${rollup.tokensOut} | ` +
 		`cost: $${total}`

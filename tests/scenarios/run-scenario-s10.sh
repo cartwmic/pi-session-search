@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario S10 — /digest:update after a turn writes digest + setSessionName
+# Scenario S10 — /session:update after a turn writes digest + setSessionName
 #
 # Goal: Catches regressions where the command exits cleanly but fails to
 #       write the digest file, or where a notify error appears in the pane.
@@ -14,7 +14,7 @@ trap 'scn_pi_stop' EXIT
 
 scn_setup_clean_home "s10"
 
-# High debounce so the background agent_end hook does not race /digest:update.
+# High debounce so the background agent_end hook does not race /session:update.
 scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-haiku-4-5","debounceSeconds":600}'
 
 scn_pi_start_session_search
@@ -25,7 +25,7 @@ scn_send "Explain TypeScript generics in 3 sentences."
 # Issue the manual digest command (internal LLM call; bridge may log a
 # "caching session=" entry for it, so scn_send could time out waiting —
 # poll the pane for the notify instead).
-"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:update"
+"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:update"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 
 # Handler emits on success: "Digest updated: \"<headline>\""

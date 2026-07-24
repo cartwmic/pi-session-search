@@ -53,7 +53,7 @@ scn_assert_file_contains \
 # 50-row capture window during the initial `sync()` discovery phase. The file
 # assertion above is the canonical proof; this is informational only.
 "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG" 2>/dev/null
-if grep -qE "[Ii]ncompatible|reset to v[45]|digest:backfill" "$PANE_LOG"; then
+if grep -qE "[Ii]ncompatible|reset to v[45]|session:backfill" "$PANE_LOG"; then
     scn_pass "S20: notify also visible in pane"
 else
     echo "  INFO: S20: notify not visible in pane (likely scrolled off-screen during sync); file assertion above is the canonical proof"

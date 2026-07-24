@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Scenario S11 — /digest:rewrite forces full re-summarize
+# Scenario S11 — /session:rewrite forces full re-summarize
 #
-# Goal: Catches regressions where /digest:rewrite skips the LLM call,
+# Goal: Catches regressions where /session:rewrite skips the LLM call,
 #       returns the cached digest, or fails to overwrite the file on disk.
 
 set -euo pipefail
@@ -26,15 +26,15 @@ scn_pi_start_session_search
 scn_send "Describe how TCP three-way handshakes work in four steps."
 
 # ── Step 1: write the initial digest ────────────────────────────────────────
-"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:update"
+"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:update"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 scn_wait_for "[Dd]igest updated" 60 \
-    || scn_fail "S11: initial /digest:update did not complete within 60s"
+    || scn_fail "S11: initial /session:update did not complete within 60s"
 
 # Locate the digest file written for this session.
 DIGEST_FILE=$(find "$SCN_TEMP_HOME/digests" -name "*.json" 2>/dev/null | head -1)
 if [[ -z "$DIGEST_FILE" ]]; then
-    scn_fail "S11: no digest file found after /digest:update"
+    scn_fail "S11: no digest file found after /session:update"
     exit $SCN_FAILED
 fi
 scn_pass "S11: initial digest file found: $(basename "$DIGEST_FILE")"
@@ -46,10 +46,10 @@ BODY1=$(cat "$DIGEST_FILE")
 sleep 2
 
 # ── Step 2: force full rewrite ───────────────────────────────────────────────
-"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:rewrite"
+"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:rewrite"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 scn_wait_for "[Dd]igest rewritten|[Dd]igest re-summarize failed" 60 \
-    || scn_fail "S11: /digest:rewrite did not complete within 60s"
+    || scn_fail "S11: /session:rewrite did not complete within 60s"
 
 echo "==== S11 results ===="
 

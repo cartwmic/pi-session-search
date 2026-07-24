@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario S09 — /digest:show with no digest yet shows fallback
+# Scenario S09 — /session:digest with no digest yet shows fallback
 #
 # Goal: Guards against the show command silently doing nothing or crashing
 #       before any digest has been generated for the current session.
@@ -21,7 +21,7 @@ scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-hai
 scn_pi_start_session_search
 
 # DO NOT send any conversation turn — the digests/ directory must stay empty.
-"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:show"
+"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:digest"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 
 # Handler emits: ctx.ui.notify("(no digest yet)", "info")

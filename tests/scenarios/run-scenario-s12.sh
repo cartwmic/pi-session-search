@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario S12 — /digest:backfill --dry-run prints cost estimate
+# Scenario S12 — /session:backfill --dry-run prints cost estimate
 #
 # Goal: Catches regressions where --dry-run silently exits, fails to enumerate
 #       session files, or omits the required cost / accuracy lines from output.
@@ -14,7 +14,7 @@ trap 'scn_pi_stop' EXIT
 
 scn_setup_clean_home "s12"
 
-# digest.json so resolvedDigestModel resolves (required by /digest:backfill).
+# digest.json so resolvedDigestModel resolves (required by /session:backfill).
 # debounceSeconds=600 keeps the live lifecycle quiet during the test.
 scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-haiku-4-5","debounceSeconds":600}'
 
@@ -54,7 +54,7 @@ done
 # ── Start pi and run the dry-run ─────────────────────────────────────────────
 scn_pi_start_session_search
 
-"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:backfill --dry-run"
+"${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:backfill --dry-run"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 
 # runBackfillDryRun emits a single multi-line notify containing:

@@ -60,7 +60,7 @@ In `fts-raw` mode the tool SHALL search via BM25 over the single raw-content FTS
 #### Scenario: Search with empty index in digest-hybrid mode
 
 - **WHEN** `session_search` is called and zero sessions have digests in `digest-hybrid` mode
-- **THEN** the tool returns "Session index is empty in digest-hybrid mode. Run /digest:backfill to digest historical sessions, or wait for new sessions to be digested live."
+- **THEN** the tool returns "Session index is empty in digest-hybrid mode. Run /session:backfill to digest historical sessions, or wait for new sessions to be digested live."
 - **AND** does not throw
 
 #### Scenario: Tool returns remediation message when invoked under misconfigured verdict
@@ -87,7 +87,7 @@ The tool SHALL filter sessions by:
 
 Results SHALL be sorted by `startedAt` descending (newest first).
 
-**In `digest-hybrid` mode, `session_list` SHALL list ALL discovered sessions, including un-digested ones.** Un-digested sessions display via `truncate(firstUserMessage, 60)` fallback with a `(no digest — run /digest:update)` suffix on the line. Only `session_search` ranking depends on digest presence; corpus browsing must work pre-backfill.
+**In `digest-hybrid` mode, `session_list` SHALL list ALL discovered sessions, including un-digested ones.** Un-digested sessions display via `truncate(firstUserMessage, 60)` fallback with a `(no digest — run /session:update)` suffix on the line. Only `session_search` ranking depends on digest presence; corpus browsing must work pre-backfill.
 
 **In `fts-raw` mode**, `session_list` displays sessions via `truncate(firstUserMessage, 60)` for every entry (no digest concept exists).
 
@@ -95,7 +95,7 @@ Results SHALL be sorted by `startedAt` descending (newest first).
 
 - **WHEN** `session_list()` is called in `digest-hybrid` mode
 - **AND** the corpus has 100 sessions, only 10 of which have digests
-- **THEN** the tool returns up to 20 sessions sorted by `startedAt`, with un-digested entries showing `firstUserMessage` truncated and tagged `(no digest — run /digest:update)`
+- **THEN** the tool returns up to 20 sessions sorted by `startedAt`, with un-digested entries showing `firstUserMessage` truncated and tagged `(no digest — run /session:update)`
 
 #### Scenario: Filter by project
 
@@ -213,10 +213,10 @@ The overlay SHALL accept a query, run `session_search` with `limit: 25`, and ren
 #### Scenario: Recovery commands work in misconfigured verdict
 
 - **WHEN** the extension is loaded with verdict `misconfigured`
-- **AND** the user runs `/session-embeddings-setup`
+- **AND** the user runs `/session:embedder`
 - **THEN** the command's interactive wizard runs normally, prompting the user to configure an embedder; on completion it writes `~/.pi/session-search/config.json` and prompts `/reload`
 - **AND** the wizard does NOT short-circuit on the misconfigured verdict (recovery commands ARE the recovery affordance)
-- **WHEN** the user runs `/digest:settings`
+- **WHEN** the user runs `/session:summarizer`
 - **THEN** the command's interactive editor runs normally, allowing the user to set provider+model in `~/.pi/session-search/digest.json`
 
 #### Scenario: Persistent status line semantics

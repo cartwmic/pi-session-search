@@ -69,15 +69,15 @@ sub_test_a() {
     my_failed=1
   fi
 
-  # 4. /digest:settings works normally (recovery command, no short-circuit)
-  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:settings"
+  # 4. /session:summarizer works normally (recovery command, no short-circuit)
+  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:summarizer"
   "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
   sleep 2
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
   if grep -qE "Digest config created|Digest config exists|Edit it then run /reload" "$PANE_LOG"; then
-    scn_pass "S02(a): /digest:settings works normally (recovery command)"
+    scn_pass "S02(a): /session:summarizer works normally (recovery command)"
   else
-    scn_fail "S02(a): /digest:settings did not show expected output"
+    scn_fail "S02(a): /session:summarizer did not show expected output"
     my_failed=1
   fi
 
@@ -142,15 +142,15 @@ sub_test_b() {
     my_failed=1
   fi
 
-  # 4. /digest:settings works normally (recovery command)
-  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/digest:settings"
+  # 4. /session:summarizer works normally (recovery command)
+  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:summarizer"
   "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
   sleep 2
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
   if grep -qE "Digest config created|Digest config exists|Edit it then run /reload" "$PANE_LOG"; then
-    scn_pass "S02(b): /digest:settings works normally (recovery command)"
+    scn_pass "S02(b): /session:summarizer works normally (recovery command)"
   else
-    scn_fail "S02(b): /digest:settings did not show expected output"
+    scn_fail "S02(b): /session:summarizer did not show expected output"
     my_failed=1
   fi
 
@@ -189,7 +189,7 @@ sub_test_c() {
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
 
   # 1. Legacy bedrock rejection notify fires (from createEmbedder)
-  if grep -qE "legacy.*embedder|bedrock.*no.*longer|/session-embeddings-setup" "$PANE_LOG"; then
+  if grep -qE "legacy.*embedder|bedrock.*no.*longer|/session:embedder" "$PANE_LOG"; then
     scn_pass "S02(c): legacy bedrock rejection notify visible"
   else
     scn_fail "S02(c): legacy bedrock rejection notify missing"
@@ -319,7 +319,7 @@ sub_test_e() {
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
 
   # 1. Legacy rejection notify fires (from createEmbedder)
-  if grep -qE "legacy.*embedder|bedrock.*no.*longer|/session-embeddings-setup" "$PANE_LOG"; then
+  if grep -qE "legacy.*embedder|bedrock.*no.*longer|/session:embedder" "$PANE_LOG"; then
     scn_pass "S02(e): legacy bedrock rejection notify visible"
   else
     scn_fail "S02(e): legacy bedrock rejection notify missing"
