@@ -234,13 +234,24 @@ export function buildPrompt(
 type CompleteFn = (
 	model: Model<Api>,
 	ctx: { systemPrompt?: string; messages: unknown[]; tools?: unknown[] },
-	opts?: { signal?: AbortSignal },
+	opts?: { signal?: AbortSignal; apiKey?: string; headers?: Record<string, string> },
 ) => Promise<AssistantMessage>;
 
 export interface GenerateOpts {
 	signal?: AbortSignal;
 	/** Threshold (tokens) above which full re-summarize is triggered. Default: 10 000. */
 	resummarizeTokenThreshold?: number;
+	/**
+	 * Resolved provider auth for the completion call. Required for providers
+	 * whose credentials are NOT discoverable via environment variables —
+	 * notably OAuth providers like `cursor`, whose token lives in pi's auth
+	 * store and is injected by a local proxy. Callers should populate these
+	 * from `ctx.modelRegistry.getApiKeyAndHeaders(model)`. Without them,
+	 * pi-ai's `complete()` falls back to env-var key resolution and errors
+	 * with `No API key for provider: <provider>` for OAuth-only providers.
+	 */
+	apiKey?: string;
+	headers?: Record<string, string>;
 	/**
 	 * Override the complete function.  Used in tests to inject a fake.
 	 * Production code leaves this undefined and uses pi-ai's `complete`.
@@ -321,8 +332,27 @@ export async function generateDigest(
 		try {
 			response = await completeFn(model, makeCtx(sysPrompt, msg), {
 				signal: opts.signal,
+				apiKey: opts.apiKey,
+				headers: opts.headers,
 			});
-		} catch {
+		} catch (err: unknown) {
+			const msg2 = err instanceof Error ? err.message : String(err);
+			log.warn({ comp: "digest", provider: model.provider, model: model.id, err: msg2 }, "digest complete() threw");
+			return null;
+		}
+
+		// pi-ai's complete() does NOT throw on provider/auth failures — it resolves
+		// to an AssistantMessage with stopReason "error" and an errorMessage. Surface
+		// that explicitly; otherwise it is silently mis-reported as a missing tool
+		// call ("extractDigestArgs returned null"), which masks real causes such as
+		// `No API key for provider: cursor`.
+		if ((response as { stopReason?: string }).stopReason === "error") {
+			const errorMessage =
+				(response as { errorMessage?: string }).errorMessage ?? "unknown error";
+			log.warn(
+				{ comp: "digest", provider: model.provider, model: model.id, errorMessage },
+				"digest completion returned an error response",
+			);
 			return null;
 		}
 

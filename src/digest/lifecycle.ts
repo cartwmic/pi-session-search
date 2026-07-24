@@ -49,7 +49,12 @@ export interface LifecycleBuilder {
 		model: Model<Api>,
 		view: ConversationView,
 		state: BuilderState,
-		opts?: { signal?: AbortSignal; resummarizeTokenThreshold?: number },
+		opts?: {
+			signal?: AbortSignal;
+			resummarizeTokenThreshold?: number;
+			apiKey?: string;
+			headers?: Record<string, string>;
+		},
 	) => Promise<{ digest: SessionDigest; anchor: number } | null>;
 }
 
@@ -236,11 +241,35 @@ export function installDigestLifecycle(
 
 		const view = liveConversationView(ctx.sessionManager);
 
+		// Resolve provider auth the same way pi's agent does. Required for
+		// OAuth-only providers (e.g. cursor) that have no env-var key fallback in
+		// pi-ai's complete(); without it every live digest fails with
+		// "No API key for provider: <provider>".
+		let liveApiKey: string | undefined;
+		let liveHeaders: Record<string, string> | undefined;
+		try {
+			const auth = await (ctx.modelRegistry as any)?.getApiKeyAndHeaders?.(model);
+			if (auth?.ok) {
+				liveApiKey = auth.apiKey;
+				liveHeaders = auth.headers;
+			} else if (auth && auth.ok === false) {
+				log.warn(
+					{ comp: "digest", provider: model.provider, model: model.id, err: auth.error },
+					"live digest: could not resolve provider auth",
+				);
+			}
+		} catch (err: unknown) {
+			const emsg = err instanceof Error ? err.message : String(err);
+			log.warn({ comp: "digest", err: emsg }, "live digest: auth resolution threw");
+		}
+
 		let result: { digest: SessionDigest; anchor: number } | null = null;
 		try {
 			result = await deps.builder.generateDigest(model, view, state, {
 				signal: ac.signal,
 				resummarizeTokenThreshold: config.resummarizeTokenThreshold,
+				apiKey: liveApiKey,
+				headers: liveHeaders,
 			});
 		} catch {
 			result = null;
