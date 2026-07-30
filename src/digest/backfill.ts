@@ -12,6 +12,7 @@ import type { SessionDigest } from "./schema";
 import { loadDigest, saveDigest } from "./storage";
 import { parsedConversationView } from "./conversation-view";
 import { generateDigest, emptyBuilderState } from "./builder";
+import type { CompleteFn } from "./builder";
 import type { DigestConfig } from "./config";
 import type { SessionIndex } from "../index/session-index";
 import { log } from "../log";
@@ -27,14 +28,8 @@ export interface BackfillRunDeps {
 	index: SessionIndex;
 	/** Resolved digest LLM model. */
 	resolvedModel: Model<Api>;
-	/**
-	 * Resolved provider API key (from ctx.modelRegistry.getApiKeyAndHeaders).
-	 * Required for OAuth-only providers such as cursor, which have no env-var
-	 * key fallback in pi-ai's complete().
-	 */
-	apiKey?: string;
-	/** Resolved provider request headers, if any. */
-	headers?: Record<string, string>;
+	/** Completion dispatch bound to Pi's effective host provider. */
+	completeFn: CompleteFn;
 	/** Merged digest config. */
 	digestConfig: DigestConfig;
 	/**
@@ -61,8 +56,7 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 		activeSessionId,
 		index,
 		resolvedModel,
-		apiKey,
-		headers,
+		completeFn,
 		digestConfig,
 		regenMode,
 		setStatus,
@@ -109,8 +103,7 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 
 				const result = await generateDigest(resolvedModel, view, state, {
 					resummarizeTokenThreshold: digestConfig.resummarizeTokenThreshold,
-					apiKey,
-					headers,
+					completeFn,
 				});
 
 				if (!result) {

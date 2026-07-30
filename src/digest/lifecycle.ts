@@ -27,8 +27,10 @@ import type { Model, Api } from "@mariozechner/pi-ai";
 
 import type { SessionDigest } from "./schema";
 import type { DigestConfig } from "./config";
-import type { BuilderState } from "./builder";
+import type { BuilderState, CompleteFn } from "./builder";
 import { emptyBuilderState } from "./builder";
+import { resolveHostCompleteFn } from "./completion";
+import type { HostModelRegistry } from "./completion";
 import type { BuilderStateOnDisk } from "./storage";
 import type { ConversationView } from "./conversation-view";
 import { liveConversationView } from "./conversation-view";
@@ -52,8 +54,7 @@ export interface LifecycleBuilder {
 		opts?: {
 			signal?: AbortSignal;
 			resummarizeTokenThreshold?: number;
-			apiKey?: string;
-			headers?: Record<string, string>;
+			completeFn?: CompleteFn;
 		},
 	) => Promise<{ digest: SessionDigest; anchor: number } | null>;
 }
@@ -241,37 +242,23 @@ export function installDigestLifecycle(
 
 		const view = liveConversationView(ctx.sessionManager);
 
-		// Resolve provider auth the same way pi's agent does. Required for
-		// OAuth-only providers (e.g. cursor) that have no env-var key fallback in
-		// pi-ai's complete(); without it every live digest fails with
-		// "No API key for provider: <provider>".
-		let liveApiKey: string | undefined;
-		let liveHeaders: Record<string, string> | undefined;
-		try {
-			const auth = await (ctx.modelRegistry as any)?.getApiKeyAndHeaders?.(model);
-			if (auth?.ok) {
-				liveApiKey = auth.apiKey;
-				liveHeaders = auth.headers;
-			} else if (auth && auth.ok === false) {
-				log.warn(
-					{ comp: "digest", provider: model.provider, model: model.id, err: auth.error },
-					"live digest: could not resolve provider auth",
-				);
-			}
-		} catch (err: unknown) {
-			const emsg = err instanceof Error ? err.message : String(err);
-			log.warn({ comp: "digest", err: emsg }, "live digest: auth resolution threw");
-		}
-
 		let result: { digest: SessionDigest; anchor: number } | null = null;
 		try {
+			const completeFn = await resolveHostCompleteFn(
+				ctx.modelRegistry as unknown as HostModelRegistry,
+				model,
+			);
 			result = await deps.builder.generateDigest(model, view, state, {
 				signal: ac.signal,
 				resummarizeTokenThreshold: config.resummarizeTokenThreshold,
-				apiKey: liveApiKey,
-				headers: liveHeaders,
+				completeFn,
 			});
-		} catch {
+		} catch (err: unknown) {
+			const emsg = err instanceof Error ? err.message : String(err);
+			log.warn(
+				{ comp: "digest", provider: model.provider, model: model.id, err: emsg },
+				"live digest: host completion failed",
+			);
 			result = null;
 		} finally {
 			if (currentAbort === ac) currentAbort = null;

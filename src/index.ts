@@ -30,6 +30,8 @@ import {
 	generateDigest,
 	emptyBuilderState,
 } from "./digest/builder";
+import { resolveHostCompleteFn } from "./digest/completion";
+import type { CompleteFn, HostModelRegistry } from "./digest/completion";
 import {
 	liveConversationView,
 	parsedConversationView,
@@ -627,27 +629,15 @@ let currentRollup: CostRollup = emptyRollup();
 				return;
 			}
 
-			// Resolve provider auth the same way pi's own agent does. Required for
-			// OAuth-only providers (e.g. cursor) whose credentials are not exposed
-			// via environment variables; without this, pi-ai's complete() errors
-			// with "No API key for provider: <provider>" and every digest fails.
-			let backfillApiKey: string | undefined;
-			let backfillHeaders: Record<string, string> | undefined;
+			let completeFn: CompleteFn;
 			try {
-				const auth = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(backfillModel);
-				if (auth?.ok) {
-					backfillApiKey = auth.apiKey;
-					backfillHeaders = auth.headers;
-				} else if (auth && auth.ok === false) {
-					ctx.ui.notify(
-						`Backfill: could not resolve auth for ${backfillModel.provider}/${backfillModel.id}: ${auth.error}`,
-						"error",
-					);
-					return;
-				}
+				completeFn = await resolveHostCompleteFn(
+					ctx.modelRegistry as unknown as HostModelRegistry,
+					backfillModel,
+				);
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Backfill: auth resolution failed: ${msg}`, "error");
+				ctx.ui.notify(`Backfill: provider resolution failed: ${msg}`, "error");
 				return;
 			}
 
@@ -656,8 +646,7 @@ let currentRollup: CostRollup = emptyRollup();
 				activeSessionId,
 				index: sessionIndex,
 				resolvedModel: backfillModel,
-				apiKey: backfillApiKey,
-				headers: backfillHeaders,
+				completeFn,
 				digestConfig,
 				regenMode: isRegen,
 				setStatus: (msg) => {

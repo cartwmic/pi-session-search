@@ -134,6 +134,13 @@ function makeCtx(overrides: {
 		},
 		modelRegistry: {
 			getAvailable: () => models,
+			getProvider: () => ({
+				stream: () => {
+					throw new Error("test provider stream should not be called directly");
+				},
+			}),
+			getApiKeyAndHeaders: async () => ({ ok: true }),
+			getProviderAuth: async () => ({ auth: {} }),
 		},
 		cwd,
 		ui: {
@@ -255,12 +262,14 @@ describe("installDigestLifecycle", () => {
 		const pi = makeFakePi();
 		const storage = makeFakeStorage();
 		let callCount = 0;
+		let capturedCompleteFn: unknown;
 
 		const deps: LifecycleDeps = {
 			storage,
 			builder: {
-				generateDigest: async () => {
+				generateDigest: async (_model, _view, _state, opts) => {
 					callCount++;
+					capturedCompleteFn = opts?.completeFn;
 					return { digest: makeDigest(), anchor: 1 };
 				},
 			},
@@ -277,6 +286,7 @@ describe("installDigestLifecycle", () => {
 		await flush(10);
 
 		assert.strictEqual(callCount, 1);
+		assert.strictEqual(typeof capturedCompleteFn, "function");
 		handle.dispose();
 	});
 

@@ -368,6 +368,13 @@ describe("buildPrompt — mode selection", () => {
 describe("generateDigest", () => {
 	const model = makeModel();
 
+	it("requires host-bound completion instead of falling back to local pi-ai", async () => {
+		await assert.rejects(
+			generateDigest(model, makeView(["test"]), emptyBuilderState()),
+			/generateDigest requires a host-bound completeFn/,
+		);
+	});
+
 	it("returns a digest with anchor=view.messages.length on success", async () => {
 		const view = makeView(["What is the weather?"]);
 		const state = emptyBuilderState();

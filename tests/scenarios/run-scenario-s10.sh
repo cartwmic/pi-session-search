@@ -14,6 +14,16 @@ trap 'scn_pi_stop' EXIT
 
 scn_setup_clean_home "s10"
 
+# Digest-hybrid mode requires an embedder. Endpoint need not be live: digest is
+# persisted before best-effort index update, and this scenario tests generation.
+scn_setup_embedder_config '{
+  "embedder": {
+    "baseUrl": "http://127.0.0.1:9999",
+    "model": "text-embedding-3-small",
+    "apiKey": "sk-fake"
+  }
+}'
+
 # High debounce so the background agent_end hook does not race /session:update.
 scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-haiku-4-5","debounceSeconds":600}'
 
@@ -28,10 +38,10 @@ scn_send "Explain TypeScript generics in 3 sentences."
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:update"
 "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
 
-# Handler emits on success: "Digest updated: \"<headline>\""
-# Allow 60s for haiku to respond.
-scn_wait_for "[Dd]igest updated|[Dd]igest generation failed" 60 \
-    || scn_fail "S10: no success/failure notify within 60s"
+# Handler emits on success: "Digest updated: \"<headline>\"". A manual trigger
+# can first supersede the agent_end call, so allow time for abort + fresh capture.
+scn_wait_for "[Dd]igest updated|[Dd]igest generation failed" 120 \
+    || scn_fail "S10: no success/failure notify within 120s"
 
 echo "==== S10 results ===="
 

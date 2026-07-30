@@ -7,15 +7,15 @@
  * to digest/lifecycle.ts (Phase 4).
  */
 
-// complete is imported lazily so that tsx's CJS compilation does not
-// attempt require("@mariozechner/pi-ai") at load time (pi-ai is ESM-only).
-// Production callers omit _completeFn; test callers inject a fake.
 import type { Model, Api, AssistantMessage, ToolCall } from "@mariozechner/pi-ai";
 import { Value } from "@sinclair/typebox/value";
 import { submitDigestTool, validateDigest, DigestArgs } from "./schema";
 import type { SessionDigest } from "./schema";
 import type { ConversationView } from "./conversation-view";
 import { log } from "../log";
+import type { CompleteFn } from "./completion";
+
+export type { CompleteFn } from "./completion";
 
 // ─── BuilderState ─────────────────────────────────────────────────────────────
 
@@ -231,38 +231,20 @@ export function buildPrompt(
 
 // ─── Generate ────────────────────────────────────────────────────────────────
 
-type CompleteFn = (
-	model: Model<Api>,
-	ctx: { systemPrompt?: string; messages: unknown[]; tools?: unknown[] },
-	opts?: { signal?: AbortSignal; apiKey?: string; headers?: Record<string, string> },
-) => Promise<AssistantMessage>;
-
 export interface GenerateOpts {
 	signal?: AbortSignal;
 	/** Threshold (tokens) above which full re-summarize is triggered. Default: 10 000. */
 	resummarizeTokenThreshold?: number;
-	/**
-	 * Resolved provider auth for the completion call. Required for providers
-	 * whose credentials are NOT discoverable via environment variables —
-	 * notably OAuth providers like `cursor`, whose token lives in pi's auth
-	 * store and is injected by a local proxy. Callers should populate these
-	 * from `ctx.modelRegistry.getApiKeyAndHeaders(model)`. Without them,
-	 * pi-ai's `complete()` falls back to env-var key resolution and errors
-	 * with `No API key for provider: <provider>` for OAuth-only providers.
-	 */
-	apiKey?: string;
-	headers?: Record<string, string>;
-	/**
-	 * Override the complete function.  Used in tests to inject a fake.
-	 * Production code leaves this undefined and uses pi-ai's `complete`.
-	 */
+	/** Host-bound completion function. Production callers resolve this from Pi's ModelRegistry. */
+	completeFn?: CompleteFn;
+	/** @deprecated Test compatibility alias. Prefer `completeFn`. */
 	_completeFn?: CompleteFn;
 }
 
 /**
  * Generate a SessionDigest for a session conversation.
  *
- * Calls `complete()` from @mariozechner/pi-ai with the `submit_digest` tool.
+ * Calls the supplied host-bound completion function with the `submit_digest` tool.
  * On tool-call validation failure: retries once with a stricter prompt.
  * If both attempts fail, returns null (the caller must leave the prior digest
  * untouched and must NOT call pi.setSessionName).
@@ -278,16 +260,9 @@ export async function generateDigest(
 ): Promise<{ digest: SessionDigest; anchor: number } | null> {
 	const threshold = opts.resummarizeTokenThreshold ?? 10_000;
 
-	// Resolve the complete function: use the injected fake (tests) or lazy-load
-	// pi-ai's real complete (production). The lazy import avoids tsx compiling
-	// a static `import` to a CJS `require()` at module load time, which would
-	// fail because @mariozechner/pi-ai is an ESM-only package.
-	let completeFn: CompleteFn;
-	if (opts._completeFn) {
-		completeFn = opts._completeFn;
-	} else {
-		const piAi = await import("@mariozechner/pi-ai");
-		completeFn = piAi.complete as unknown as CompleteFn;
+	const completeFn = opts.completeFn ?? opts._completeFn;
+	if (!completeFn) {
+		throw new Error("generateDigest requires a host-bound completeFn");
 	}
 
 	const { systemPrompt, userMessage } = buildPrompt(state, view, threshold, model);
@@ -332,8 +307,6 @@ export async function generateDigest(
 		try {
 			response = await completeFn(model, makeCtx(sysPrompt, msg), {
 				signal: opts.signal,
-				apiKey: opts.apiKey,
-				headers: opts.headers,
 			});
 		} catch (err: unknown) {
 			const msg2 = err instanceof Error ? err.message : String(err);

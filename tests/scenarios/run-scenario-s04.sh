@@ -35,7 +35,7 @@ scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-hai
 
 scn_pi_start_session_search
 
-scn_assert_pane_contains "\(claude-bridge\)" \
+scn_assert_file_contains "$BRIDGE_LOG" '"msg":"provider: registered' \
     "S04: pi started successfully"
 
 scn_assert_pane_not_contains "digest mode unavailable" \
@@ -53,13 +53,10 @@ DIGEST_DIR="$SCN_TEMP_HOME/digests"
 DIGEST_FILE=""
 
 for i in $(seq 1 120); do
-    shopt -s nullglob
-    candidates=("$DIGEST_DIR"/*.json)
-    shopt -u nullglob
-    for f in "${candidates[@]}"; do
+    for f in "$DIGEST_DIR"/*.json; do
+        [[ -f "$f" ]] || continue
         [[ "$f" == *.state.json ]] && continue
         [[ "$f" == *.tmp ]] && continue
-        [[ -f "$f" ]] || continue
         DIGEST_FILE="$f"
         break 2
     done
@@ -78,8 +75,11 @@ scn_pass "S04: digest .json appeared"
 SESSION_ID="$(basename "$DIGEST_FILE" .json)"
 STATE_FILE="$DIGEST_DIR/${SESSION_ID}.state.json"
 
-scn_assert_file_exists "$STATE_FILE" \
-    "S04: builder-state .state.json exists alongside digest"
+if scn_wait_for_file "$STATE_FILE" 10; then
+    scn_pass "S04: builder-state .state.json exists alongside digest"
+else
+    scn_fail "S04: builder-state .state.json not found within 10s"
+fi
 
 # ─── Digest schema assertions ────────────────────────────────────────────────
 scn_assert_file_contains "$DIGEST_FILE" '"schemaVersion": *1' \
