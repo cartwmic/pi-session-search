@@ -48,6 +48,6 @@
   },
   "scripts": {
     "test": "npm run test:lint-modes && find src -name '*.test.ts' | sort | xargs node --test --test-force-exit --import tsx",
-    "test:lint-modes": "! grep -rn '\"digest-mode\"\\|\"hybrid-raw\"' src/ --include='*.ts' | grep -v 'src//__tests__/\\|src//index/session-index.ts\\|LegacyDiskMode\\|src//index/mode.ts'"
+    "test:lint-modes": "! grep -rn '\"digest-mode\"\\|\"hybrid-raw\"' src/ --include='*.ts' | grep -v 'src/__tests__/\\|src/index/session-index.ts\\|LegacyDiskMode\\|src/index/mode.ts'"
   }
 }

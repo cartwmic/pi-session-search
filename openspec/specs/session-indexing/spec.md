@@ -5,20 +5,20 @@ TBD - created by archiving change add-digest-driven-indexing. Update Purpose aft
 ## Requirements
 ### Requirement: Mode auto-detection
 
-The indexing layer SHALL operate in one of two modes, selected automatically based on configuration. There is no user-facing mode toggle. Partial configuration (exactly one of embedder OR digest model present, OR both broken) SHALL produce a misconfigured verdict that gates the bodies of search/digest commands and tools, NOT a graceful demotion to a different mode.
+The indexing layer SHALL operate in one of two modes, selected automatically based on configuration. There is no user-facing mode toggle. Digest configuration is the explicit opt-in boundary: without digest intent the extension SHALL use `fts-raw`, even if a standalone embedder is configured. Once digest intent exists, missing or broken required components SHALL produce a misconfigured verdict that gates search/digest command and tool bodies.
 
 Conventions for the table below: "embedder available" means `createEmbedder(config.embedder, ...)` returned a non-null `Embedder` instance. "Embedder rejected" (legacy bedrock or other invalid types) is treated identically to "no embedder" by the verdict resolver — both produce a `null` embedder. The verdict resolver consumes the embedder-construction outcome (null vs Embedder), NOT the raw config-file contents.
 
 | Config / runtime state                                                | Verdict             |
 |-----------------------------------------------------------------------|---------------------|
 | embedder null AND `digestRequested === false`                         | `fts-raw`           |
-| embedder available AND `digestRequested === false`                    | `misconfigured` (`missing: "digest"`) |
+| embedder available AND `digestRequested === false`                    | `fts-raw`           |
 | embedder available AND digest model resolvable                        | `digest-hybrid`     |
 | embedder available AND `digestRequested === true` AND no digest model resolvable | `misconfigured` (`missing: "digest"`) |
 | embedder null AND `digestRequested === true` AND digest model resolvable | `misconfigured` (`missing: "embedder"`) |
 | embedder null AND `digestRequested === true` AND no digest model resolvable | `misconfigured` (`missing: "both"`) |
 
-**Rationale for `embedder available AND digestRequested === false`** → `misconfigured`: this is the legacy v2.x `hybrid-raw` cohort — a user with an embedder configured but no digest intent. Under v3.0.0's binary mode rule, embedder configured implies digest-hybrid intent. To boot in `fts-raw`, the user must remove the embedder config (or, intuitively, configure a digest model and join `digest-hybrid`). The misconfigured remediation notify (`missing: "digest"`) names both the file to add (`digest.json`) AND the file to remove (`config.json`) so the user can choose either resolution path.
+**Rationale for `embedder available AND digestRequested === false`** → `fts-raw`: digest generation must never be activated by inference. Existing embedder configuration remains dormant for indexing until `/session:summarizer` writes explicit digest-model configuration. Raw FTS search remains available throughout.
 
 In `fts-raw` mode the system SHALL preserve upstream pi-session-search semantics (FTS5 over raw user messages). In `digest-hybrid` mode the system SHALL embed `digest.body` and FTS-index BOTH `digest.body` and a budgeted concatenation of raw session content (`buildRawFtsContent`) as separately-weighted columns. See `session-search` capability for normative weight constraints. The `missing` field's priority when both halves are absent SHALL be `"both"` so the remediation notify can name BOTH files.
 
@@ -50,17 +50,19 @@ Verdict is computed once per `session_start`. Mid-session config edits without `
 
 **Headless / RPC deployments**: `ctx.ui.setStatus` may not surface to a visible UI in non-TUI deployments. In those contexts the misconfigured signal is conveyed via `ctx.ui.notify` AND a `console.error` line (the structured-log convention; pi-coding-agent does not expose a dedicated logger). The TUI status line is a best-effort signal, not a guarantee.
 
-#### Scenario: No embedder, no digest model → fts-raw mode
+#### Scenario: No explicit digest config → fts-raw mode
 
-- **WHEN** `~/.pi/session-search/config.json` has no `embedder` field (or does not exist)
-- **AND** no digest model is configured or resolvable
+- **WHEN** no global or project `digest.json` exists
+- **AND** an embedder may be absent or configured
 - **THEN** the active index is `FtsSessionIndex` indexing raw user messages via `buildContent(session)`
 - **AND** the extension registers `session_search`, `session_list`, `session_read` tools and `/find-session` command
+- **AND** the persistent `session-digest` footer directs the user to `/session:summarizer`
+- **AND** no digest provider request is dispatched
 
 #### Scenario: Embedder + digest model → digest-hybrid mode
 
 - **WHEN** `~/.pi/session-search/config.json` configures an embedder
-- **AND** a digest model is resolvable from the model registry OR explicitly configured in `digest.json`
+- **AND** `digest.json` explicitly configures a provider and model that resolve from the model registry
 - **THEN** the active index is `SessionIndex` embedding `digest.body` and writing both digest body and raw content to FTS
 - **AND** the extension registers all search tools, the digest lifecycle, and digest slash commands
 
@@ -108,17 +110,17 @@ Verdict is computed once per `session_start`. Mid-session config edits without `
 - **AND** the notify text names BOTH `~/.pi/session-search/config.json` AND `~/.pi/session-search/digest.json` as files to fix
 - **AND** the status line is `"session-search: misconfigured (no embedder, no digest model)"`
 
-#### Scenario: Warm-path valid → misconfigured transition
+#### Scenario: Warm-path digest-hybrid → fts-raw transition
 
 - **WHEN** the extension was previously loaded with verdict `digest-hybrid` and search/digest commands+tools were registered at module load
 - **AND** the user removes `~/.pi/session-search/digest.json` and runs `/reload`
-- **AND** `session_start` re-fires (incrementing `bootGeneration`), and the new verdict resolves to `misconfigured`
-- **THEN** `currentVerdict` (closure-shared) is updated to misconfigured (unless a still-newer `session_start` has further incremented `bootGeneration` during the await; in that case the current handler short-circuits the assignment)
-- **THEN** the persistent status line is re-set to the misconfigured message
-- **AND** an error notify fires
-- **AND** the registered command/tool handlers (which were registered ONCE at module load) now return the misconfigured remediation when invoked, because they re-check `currentVerdict` at invocation time
-- **AND** any in-flight async work from the prior valid verdict (initial sync, periodic sync, status-clear timeouts, debounced digest writes) compares its captured `bootGeneration` to `currentBootGeneration` on completion and short-circuits, leaving the misconfigured status line and notify intact
-- **AND** the prior `SessionIndex` instance has any in-flight embedder fetches aborted (via `AbortController.abort()`); its `FtsSide` SQLite handle is closed before the next migration / index construction can run
+- **AND** `session_start` re-fires (incrementing `bootGeneration`), and the new verdict resolves to `fts-raw`
+- **THEN** `currentVerdict` is updated unless a newer `session_start` has won the generation race
+- **AND** `FtsSessionIndex` is constructed and raw FTS search remains usable
+- **AND** the `session-digest` footer says `Digest disabled: run /session:summarizer`
+- **AND** digest command handlers return digest-disabled remediation without invoking a provider
+- **AND** in-flight async work from the prior verdict short-circuits on generation mismatch
+- **AND** the prior `SessionIndex` aborts in-flight embedder fetches and closes its `FtsSide` handle
 
 #### Scenario: Warm-path verdict transition does not race with stale upsert
 
@@ -342,15 +344,15 @@ This self-heals interrupted migrations AND manual schema drift (file copy from a
 - **AND** `~/.pi/session-search/digests/*.json` is untouched
 - **AND** the next sync repopulates the index from existing digests
 
-#### Scenario: Legacy hybrid-raw + still-no-digest-model → wipe with misconfigured notify
+#### Scenario: Legacy hybrid-raw + no digest config → wipe then fts-raw
 
 - **WHEN** the extension loads with `session-index.json` of `version: 4` and `lastMode: "hybrid-raw"`
-- **AND** the post-migration verdict resolves to `misconfigured` with `missing: "digest"` (embedder still configured but no digest model resolvable)
+- **AND** no global or project `digest.json` exists
 - **THEN** `session-index.json` is rewritten with `{version: 5, vectorDim: 0, lastMode: undefined, sessions: {}}`
 - **AND** `hybrid-fts.db` is wiped
-- **AND** the user-facing notify is the misconfigured remediation message (NOT the rebuild-promise message, which would lie about something the misconfigured verdict cannot do)
-- **AND** the persistent status line is set to the misconfigured message
-- **AND** the recovery commands `/session:embedder` and `/session:summarizer` are registered so the user can fix their config from inside pi
+- **AND** the post-migration verdict resolves to `fts-raw`
+- **AND** raw FTS indexing begins normally
+- **AND** the persistent `session-digest` footer directs the user to `/session:summarizer`
 
 #### Scenario: Legacy digest-mode index is wiped on first v3.0.0 load
 

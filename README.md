@@ -5,8 +5,8 @@ Index, digest, and search past [pi](https://github.com/badlogic/pi-mono) coding 
 ## Features
 
 - **Zero-config search** — FTS5 keyword search works immediately, no API keys or embedder needed
-- **Hybrid search** — When an embedder is configured, combines cosine similarity + BM25 via Reciprocal Rank Fusion for best-of-both-worlds retrieval
-- **Digest-driven indexing** — When a digest model is available, each session is distilled to a structured prose summary (`digest.body`) and a display headline (`digest.headline`); embeddings and FTS run over the digest instead of raw transcript noise
+- **Hybrid search** — When an embedder and digest model are explicitly configured, combines cosine similarity + BM25 via Reciprocal Rank Fusion for best-of-both-worlds retrieval
+- **Digest-driven indexing** — When a digest model is explicitly configured, each session is distilled to a structured prose summary (`digest.body`) and a display headline (`digest.headline`); embeddings and FTS run over the digest instead of raw transcript noise
 - **Browse & filter** — List sessions by project, date range, archive status (`session_list`)
 - **Read conversations** — View the full conversation from any past session (`session_read`)
 - **Session picker** — `/find-session` overlay for interactive search and session switching
@@ -19,10 +19,12 @@ The active mode is **auto-detected** from your configuration — no toggle neede
 
 | Mode | Condition | Search surface |
 |------|-----------|----------------|
-| `fts-raw` | No embedder configured | FTS5 over raw user messages |
-| `digest-hybrid` | Embedder + resolvable digest model | Cosine over digest-body embeddings + BM25 over (digest body, raw content) |
+| `fts-raw` | No explicit digest model config (embedder may be absent or configured) | FTS5 over raw user messages |
+| `digest-hybrid` | Embedder + explicit, resolvable digest model config | Cosine over digest-body embeddings + BM25 over (digest body, raw content) |
 
-**Misconfigured verdict**: if exactly one of embedder / digest model is configured (partial config), the extension enters a misconfigured state with a pinned status error and a remediation notify. Search and digest tools return the remediation message instead of executing. Recovery commands (`/session:embedder`, `/session:summarizer`) remain available in all states.
+Digest generation never auto-selects a model. Without a complete `digest.json`, the footer shows `Digest disabled: run /session:summarizer`; this status is UI-only and is never added to session content or the search index.
+
+**Misconfigured verdict**: once `digest.json` expresses digest intent, a missing embedder or unresolved/partial digest model enters a misconfigured state with a pinned status error and remediation notify. Without `digest.json`, search stays in `fts-raw` mode even when an embedder is configured. Recovery commands (`/session:embedder`, `/session:summarizer`) remain available in all states.
 
 ## Install
 
@@ -67,7 +69,7 @@ Any provider that exposes a standard `/v1/embeddings` endpoint works — Togethe
 
 ### Digest model (optional — enables digest-hybrid mode)
 
-Requires an embedder to be configured first. The digest builder auto-detects a cheap model from your configured providers (priority: `gpt-5.4-nano` → `gpt-5.4-mini` → `claude-haiku-4-5` → `gemini-3-flash-preview`). To override, create `~/.pi/session-search/digest.json`:
+Requires an embedder and an explicit digest model configuration. Run `/session:summarizer` to select a model, or create `~/.pi/session-search/digest.json` manually:
 
 ```json
 {
@@ -81,7 +83,7 @@ Requires an embedder to be configured first. The digest builder auto-detects a c
 }
 ```
 
-All fields except `provider`/`model` are optional (shown with defaults). Run `/session:summarizer` to create the file with defaults in place.
+`provider` and `model` are required; remaining fields are optional (shown with defaults). Missing or partial model configuration disables digest generation. Run `/session:summarizer` to create a valid file.
 
 After setup, run `/session:backfill` to digest historical sessions. New sessions are digested live with a 60-second debounce after each agent turn.
 

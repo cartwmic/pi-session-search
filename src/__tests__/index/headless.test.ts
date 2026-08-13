@@ -62,6 +62,10 @@ describe("headless safety (7.9a)", () => {
     process.env.OPENAI_API_KEY = "sk-test-misconfigured-verdict"
     try { rmSync(sessionSearchHome, { recursive: true }) } catch {}
     mkdirSync(sessionSearchHome, { recursive: true })
+    writeFileSync(
+      join(sessionSearchHome, "digest.json"),
+      JSON.stringify({ provider: "missing-provider", model: "missing-model" }),
+    )
     spyConsoleError()
   })
 

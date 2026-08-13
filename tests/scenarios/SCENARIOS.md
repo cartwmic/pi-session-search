@@ -17,7 +17,7 @@ Tags: `[ci]` = CI-safe (no live model access required for pass condition). `[liv
 |---|---|
 | Provider | `claude-bridge` |
 | Model | `claude-bridge/claude-haiku-4-5` (cheap, fast) |
-| Digest model | resolved from priority list (haiku auto-selected) |
+| Digest model | explicitly configured as `claude-bridge/claude-haiku-4-5` |
 | `debounceSeconds` | `0` (digests fire immediately on `agent_end`) |
 | HOME | per-scenario tempdir under `tests/scenarios/.test-output/` |
 | Extension load | `pi -e <repo>` (bundle auto-load) |
@@ -26,12 +26,12 @@ Tags: `[ci]` = CI-safe (no live model access required for pass condition). `[liv
 
 ### CI-safe scenarios (blocking for v3.0.0 release gate)
 
-- **S01** `[ci]` — **fts-raw mode loads cleanly when no embedder configured.** Empty `~/.pi/session-search/`. Pi starts. Assert: extension loaded, no notify error, mode is fts-raw (no embedder warning).
-- **S02** `[ci]` — **Misconfigured-verdict UX (5 sub-tests, continued-on-failure).** 5 independent sub-tests each with its own pi instance:
-  - (a) embedder set, digest absent → status set, error notify, `session_search`/`/find-session` return remediation, `/session:embedder` and `/session:summarizer` work normally.
+- **S01** `[ci]` — **fts-raw mode loads with no digest config.** Empty `~/.pi/session-search/`. Pi starts. Assert: extension loaded, mode is fts-raw, and footer says digest is disabled without treating search as an error.
+- **S02** `[ci]` — **Explicit digest opt-in and misconfiguration UX (5 sub-tests, continued-on-failure).** 5 independent sub-tests each with its own pi instance:
+  - (a) embedder set, digest absent → fts-raw search remains available; footer and digest commands direct user to `/session:summarizer`.
   - (b) digest set, embedder absent → symmetric checks with opposite missing field.
   - (c) both broken (legacy bedrock embedder + digest configured but no model) → `missing: "both"` notify mentions both files.
-  - (d) warm-path transition. Start digest-hybrid, edit config to remove `digest.json`, `/reload`, assert status updates and prior tool invocations return remediation.
+  - (d) warm-path transition. Start digest-hybrid, remove `digest.json`, `/reload`, assert transition to fts-raw, persistent digest-disabled footer, and no provider dispatch.
   - (e) legacy-bedrock + no-digest-intent → legacy-rejection notify fires; verdict resolves to `fts-raw`; `session_search` works as normal fts-raw search (NOT misconfigured).
   Sub-tests run sequentially but each sets up its own independent `PI_SESSION_SEARCH_HOME`. Assertions capture pass/fail per sub-test; final exit reports per-sub-test status.
 - **S08** `[ci]` — **`/session:summarizer` creates global config.** Empty HOME. Run `/session:summarizer`. Assert: `~/.pi/session-search/digest.json` now exists with defaults. Pane shows path + `/reload` instruction.
@@ -44,7 +44,7 @@ Tags: `[ci]` = CI-safe (no live model access required for pass condition). `[liv
 
 Lifecycle and digest generation:
 
-- **S03** `[live-model]` — **digest-hybrid when embedder + cheap model both available.** Write `config.json` (embedder) + `digest.json` (default). Pi starts. Assert: digest lifecycle installed, no misconfigured notify, digest file written after a turn.
+- **S03** `[live-model]` — **digest-hybrid when embedder + explicit digest model both available.** Write `config.json` (embedder) + `digest.json` (provider/model). Pi starts. Assert: digest lifecycle installed, no misconfigured notify, digest file written after a turn.
 - **S04** `[live-model]` — **agent_end with `debounceSeconds=0` fires generateDigest immediately on first turn.** Send a real conversation prompt. After response, assert: `~/.pi/session-search/digests/<id>.json` exists, `<id>.state.json` exists.
 - **S05** `[live-model]` — **session_compact bypasses debounce.** Send a few turns. Issue `/compact`. Assert: digest written immediately even if debounce timer would have prevented agent_end-driven write.
 - **S06** `[live-model]` — **session_shutdown aborts in-flight LLM call.** Send long prompt. While model is responding, exit pi. Restart pi. Assert: no partial/corrupted digest file in tempdir.

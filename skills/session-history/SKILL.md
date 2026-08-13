@@ -14,7 +14,7 @@ This skill provides three tools:
 ### session_search
 Semantic search across all indexed sessions. Use for finding sessions by topic, technology, or intent.
 
-In **digest-hybrid** mode (the default when a digest model is available), results include the session's `digest.headline` (≤80 char display title) and a `digest.body` excerpt (200–400 word prose summary written by the LLM). In `fts-raw` mode, results show the raw first-user-message excerpt.
+In **digest-hybrid** mode (enabled by explicit embedder and digest-model configuration), results include the session's `digest.headline` (≤80 char display title) and a `digest.body` excerpt (200–400 word prose summary written by the LLM). In `fts-raw` mode, results show the raw first-user-message excerpt.
 
 ```
 session_search(query="refactoring the auth module")
@@ -52,7 +52,7 @@ session_read(session="...", include_tools=true)             # Include tool call 
 | `/session:embedder` | Configure the embedder for hybrid/digest search |
 | `/session:sync` | Force an immediate incremental re-sync |
 | `/session:reindex` | Force a full re-index of all sessions |
-| `/session:summarizer` | Show config; create `~/.pi/session-search/digest.json` with defaults if absent |
+| `/session:summarizer` | Select digest model; create or update `~/.pi/session-search/digest.json` |
 | `/session:digest` | Show the current session's stored digest |
 | `/session:update` | Trigger an immediate digest write for the current session |
 | `/session:rewrite` | Force a full re-summarize (ignores prior digest) |
@@ -68,7 +68,7 @@ session_read(session="...", include_tools=true)             # Include tool call 
 
 ## Setup
 
-Run `/session:embedder` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/session:summarizer` and `/session:backfill` to enable digest-hybrid mode for best recall.
+Run `/session:embedder` to configure an embedding provider (any OpenAI-compatible `/v1/embeddings` endpoint). Then run `/session:summarizer` to explicitly select a digest model and `/session:backfill` to enable digest-hybrid mode for best recall. Digest generation does not auto-select a model; when no digest model is configured, the UI-only footer warns that digests are disabled.
 
 To force a full re-index, run `/session:reindex`.
 

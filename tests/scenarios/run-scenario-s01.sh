@@ -2,8 +2,8 @@
 # Scenario S01 — fts-raw mode loads cleanly when no embedder is configured.
 #
 # Goal: With an empty ~/.pi/session-search/ (no config.json, no digest.json),
-# the extension starts in fts-raw mode. No embedder or digest error notifications
-# appear. The session index is written with version=5 and vectorDim=0.
+# the extension starts in fts-raw mode. Digest footer warns that generation is
+# disabled, without blocking FTS. The index is written with version=5/vectorDim=0.
 
 set -euo pipefail
 source "$(dirname "$0")/scenario-lib.sh"
@@ -29,8 +29,8 @@ scn_assert_pane_contains "\(claude-bridge\)" \
 scn_assert_pane_not_contains "embedder configured but" \
     "S01: no embedder-key-missing error on startup"
 
-scn_assert_pane_not_contains "digest mode unavailable" \
-    "S01: no digest-unavailable warning on startup (not requested)"
+scn_assert_pane_contains "Digest disabled.*session:summarizer" \
+    "S01: digest-disabled footer points to explicit setup"
 
 scn_assert_pane_not_contains "legacy embedder" \
     "S01: no legacy-embedder error"
@@ -47,8 +47,8 @@ scn_wait_for "[Rr][Ee][Aa][Dd][Yy]" 60 || scn_fail "S01: model response not seen
 scn_assert_pane_not_contains "embedder configured but" \
     "S01: no embedder error after turn"
 
-scn_assert_pane_not_contains "digest mode unavailable" \
-    "S01: no digest warning after turn"
+scn_assert_pane_contains "Digest disabled.*session:summarizer" \
+    "S01: digest-disabled footer persists after turn"
 
 # ─── File assertions — index created in fts-raw mode ────────────────────────
 INDEX_FILE="$SCN_TEMP_HOME/index/session-index.json"

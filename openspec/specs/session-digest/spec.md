@@ -40,77 +40,73 @@ interface SessionDigest {
 - **AND** the prior digest (if any) is left untouched
 - **AND** `pi.setSessionName` is not called
 
-### Requirement: Cheap-model auto-detection
+### Requirement: Explicit digest-model configuration
 
-The digest builder SHALL resolve the LLM model from `ctx.modelRegistry.getAvailable()` using a priority list when no explicit `provider`+`model` is configured.
+The digest builder SHALL resolve an LLM model only when both `provider` and `model` are explicitly configured in the effective digest config. It SHALL NOT scan, rank, or auto-select models from `ctx.modelRegistry.getAvailable()`.
 
-The default priority list SHALL be: `gpt-5.4-nano`, `gpt-5.4-mini`, `claude-4-5-haiku`, `gemini-3-flash` (in order).
+When either field is absent, or the configured provider/model pair is unavailable, the resolver SHALL return `undefined`. Digest generation SHALL NOT dispatch a provider request unless the mode verdict is `digest-hybrid` and the configured model resolves.
 
-If an explicit `provider` and `model` are set in the digest config, those take precedence and no auto-detection runs.
+#### Scenario: Missing configuration disables digest generation
 
-When the resolver returns `undefined` AND `digestRequested === true` (see `digestRequested` predicate), the extension's mode-resolution verdict SHALL be `misconfigured` (see `session-indexing` capability), NOT a graceful demotion to a different mode. The session-digest layer never decides the active mode — it only contributes the "digest model resolved?" signal to the binary mode resolver.
+- **WHEN** no global or project `digest.json` exists
+- **AND** the model registry contains otherwise suitable models
+- **THEN** the resolver returns `undefined`
+- **AND** agent lifecycle events dispatch no digest request
+- **AND** FTS raw indexing and search remain available
+- **AND** the persistent `session-digest` footer says `Digest disabled: run /session:summarizer`
+- **AND** the footer text is UI-only and never enters session content or the search index
 
-#### Scenario: Auto-detect picks first available model
+#### Scenario: Partial configuration does not resolve
 
-- **WHEN** digest config has no `provider`/`model`
-- **AND** `ctx.modelRegistry.getAvailable()` returns models including `gpt-5.4-mini` and `claude-4-5-haiku` but not `gpt-5.4-nano`
-- **THEN** the resolver returns `gpt-5.4-mini` (highest-priority available)
+- **WHEN** digest config contains only `provider` or only `model`
+- **THEN** the resolver returns `undefined`
+- **AND** no registry model is selected as a fallback
 
-#### Scenario: Explicit override skips auto-detect
+#### Scenario: Explicit configuration resolves exact model
 
 - **WHEN** digest config sets `provider: "anthropic"` and `model: "claude-4-5-sonnet"`
-- **AND** the priority-list models are also available
+- **AND** that provider/model pair is available in the registry
 - **THEN** the resolver returns `anthropic/claude-4-5-sonnet`
 
-#### Scenario: No suitable model available with embedder configured AND digestRequested true → misconfigured (after async retry)
+#### Scenario: Configured model unavailable after async retry
 
-- **WHEN** none of the priority-list models are available and no explicit config is set
-- **AND** an embedder IS configured in `~/.pi/session-search/config.json`
-- **AND** `digestRequested === true` (e.g., `~/.pi/session-search/digest.json` exists)
-- **AND** the registry does NOT populate within the async-retry window (~1000ms)
-- **THEN** the resolver returns `undefined` AFTER the bounded retry
-- **AND** the mode-resolution verdict is `misconfigured` with `missing: "digest"`
-- **AND** search/digest commands and tools have verdict-aware bodies that return the remediation message on invocation
-- **AND** `/session:embedder` and `/session:summarizer` work normally (they ARE the recovery affordance)
-- **AND** the extension sets a persistent error status line and emits ONE error notify per `session_start` (see `session-indexing` Mode auto-detection requirement)
+- **WHEN** both digest fields are configured but the matching model is not initially available
+- **AND** the registry does NOT populate within the bounded retry window (~1000ms)
+- **THEN** the resolver returns `undefined` after the retry
+- **AND** the mode verdict is `misconfigured` with the appropriate missing component
+- **AND** digest commands return actionable `/session:summarizer` remediation without dispatching a provider request
 
-#### Scenario: Registry populates within retry window → verdict transitions to digest-hybrid silently
+#### Scenario: Registry populates within retry window
 
-- **WHEN** the synchronous first verdict resolution returns `misconfigured (missing: "digest")` because `ctx.modelRegistry.getAvailable()` has not yet populated
-- **AND** `digestRequested === true`
-- **AND** the registry populates within the ~1000ms retry window (the second resolution sees the digest model)
+- **WHEN** both digest fields are configured
+- **AND** the matching registry model appears during the bounded retry
+- **AND** an embedder is available
 - **THEN** the verdict resolves to `digest-hybrid`
-- **AND** no misconfigured notify or status line is shown
-- **AND** the user does not need to `/reload` to recover from the registry-population race
-- **AND** the resolver SHALL NOT retry for `missing: "embedder"` cases (embedder construction is synchronous; no benefit from retry)
-
-#### Scenario: Legacy hybrid-raw user with no digest model on v3.0.0 upgrade → misconfigured + recovery commands
-
-- **WHEN** a v2.x user upgrades to v3.0.0 with `lastMode === "hybrid-raw"` on disk and an embedder configured but `digestRequested === true` and no digest model resolvable
-// ... 67 more lines (total: 116)
+- **AND** digest lifecycle generation may run
 
 ### Requirement: digestRequested predicate
 
-The extension SHALL compute a `digestRequested: boolean` predicate to gate the one-time "digest mode unavailable" notification on `session_start`. The predicate is true if and only if:
+The extension SHALL compute a `digestRequested: boolean` predicate. The predicate is true if and only if:
 
 - `~/.pi/session-search/digest.json` (global) OR `<cwd>/.pi/session-search/digest.json` (project) exists, OR
-- the digest config (after merging defaults) has explicit `provider` and `model` fields set.
+- the effective digest config has explicit `provider` and `model` fields set.
 
-The priority list being non-empty SHALL NOT trigger the notification by itself — the user must have indicated digest intent via either an existing config file or explicit overrides.
+When `digestRequested` is false, the extension SHALL use `fts-raw` mode regardless of standalone embedder configuration. Missing digest configuration SHALL disable only digest-dependent functionality.
 
-#### Scenario: digestRequested true with config file
+#### Scenario: digestRequested true with invalid config file
 
-- **WHEN** `~/.pi/session-search/digest.json` exists with default-only contents
-- **AND** `resolveModel(...)` returns `undefined`
+- **WHEN** a global or project `digest.json` exists but lacks a complete, resolvable provider/model pair
 - **THEN** `digestRequested === true`
-- **AND** the one-time "digest mode unavailable" notification fires on `session_start`
+- **AND** the mode verdict is `misconfigured`
+- **AND** recovery commands remain available
 
 #### Scenario: digestRequested false on fresh install
 
 - **WHEN** no `digest.json` file exists in either global or project scope
 - **AND** the extension loads on a fresh install
 - **THEN** `digestRequested === false`
-- **AND** the notification does NOT fire even when the priority list cannot be resolved (user has not asked for digests)
+- **AND** FTS raw indexing and search initialize normally
+- **AND** digest commands explain that digests are disabled and direct the user to `/session:summarizer`
 
 ### Requirement: Incremental vs full prompt selection
 
@@ -387,8 +383,8 @@ The schema:
 
 ```ts
 interface DigestConfig {
-  provider?: string;             // optional override; auto-detect if absent
-  model?: string;                // optional override; auto-detect if absent
+  provider?: string;             // required to enable digest generation
+  model?: string;                // required to enable digest generation
   debounceSeconds: number;       // default 60
   resummarizeTokenThreshold: number; // default 10000
   maxTokens: number;             // default 1500 (covers structured JSON body + envelope + drift headroom)
@@ -397,7 +393,7 @@ interface DigestConfig {
 }
 ```
 
-The `/session:summarizer` slash command SHALL create the global file with defaults if it does not exist, and notify the user with the file path and a reminder to run `/reload`.
+The `/session:summarizer` slash command SHALL require the user to select an available model, create the global file with explicit `provider` and `model` fields if it does not exist, and notify the user with the file path and a reminder to run `/reload`.
 
 Config SHALL reload on `session_start` events.
 
@@ -407,11 +403,12 @@ Config SHALL reload on `session_start` events.
 - **AND** project config at `<cwd>/.pi/session-search/digest.json` sets `debounceSeconds: 30`
 - **THEN** the effective `debounceSeconds` for sessions in that cwd is `30`
 
-#### Scenario: /session:summarizer creates default file
+#### Scenario: /session:summarizer creates explicit config
 
 - **WHEN** `~/.pi/session-search/digest.json` does not exist
 - **AND** the user runs `/session:summarizer`
-- **THEN** the file is created with the default config
+- **AND** selects an available model
+- **THEN** the file is created with explicit `provider` and `model` fields plus defaults
 - **AND** the user is notified of the path
 
 #### Scenario: Config reload picks up edits

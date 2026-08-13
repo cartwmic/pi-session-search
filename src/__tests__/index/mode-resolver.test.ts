@@ -94,11 +94,11 @@ describe("(a) binary config combinations", () => {
     expectMisconfigured(v, "digest")
   })
 
-  it("embedder available, no digest intent → misconfigured (missing: digest)", async () => {
+  it("embedder available, no digest intent → fts-raw", async () => {
     const v = await resolveModeVerdict(makeConfig(), () => [], {
       embedderAvailable: true,
     })
-    expectMisconfigured(v, "digest")
+    expectFtsRaw(v)
   })
 
   it("no embedder, digest model resolved, digest requested → misconfigured (missing: embedder)", async () => {

@@ -72,7 +72,7 @@ cat > "$SCN_TEMP_HOME/config.json" << EOF
 }
 EOF
 
-# digest.json: auto-detect haiku → resolvedDigestModel set → digest-hybrid active
+# digest.json: explicit haiku selection → resolvedDigestModel set → digest-hybrid active
 scn_setup_session_search_config '{"provider":"claude-bridge","model":"claude-haiku-4-5","debounceSeconds": 0}'
 
 # ─── Start pi ────────────────────────────────────────────────────────────────

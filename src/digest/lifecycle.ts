@@ -219,6 +219,7 @@ export function installDigestLifecycle(
 	 */
 	async function fireDigest(): Promise<void> {
 		if (disposed) return;
+		if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
 		if (!currentModel || !sessionId || !currentCtx) return;
 		if (state.pendingCall) {
 			state.dirty = true;
@@ -403,8 +404,13 @@ export function installDigestLifecycle(
 			state.lastWrittenSummaryIndex = savedBuilderState.lastWrittenSummaryIndex;
 		}
 
-		// Resolve the digest model for this session.
-		currentModel = deps.modelResolver(config, ctx.modelRegistry.getAvailable());
+		// Resolve a model only while digest-hybrid is active. This guard must run
+		// before provider dispatch; post-generation guards protect persistence but
+		// cannot prevent an unwanted LLM request.
+		currentModel =
+			!deps.isCurrentGeneration || deps.isCurrentGeneration()
+				? deps.modelResolver(config, ctx.modelRegistry.getAvailable())
+				: undefined;
 	});
 
 	pi.on("agent_end", (_event, ctx) => {

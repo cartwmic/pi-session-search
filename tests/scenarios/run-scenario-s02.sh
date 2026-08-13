@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Scenario S02 — misconfigured-verdict UX (5 sub-tests)
+# Scenario S02 — explicit digest opt-in and misconfigured UX (5 sub-tests)
 #
-# Repurposed from old "hybrid-raw boots clean" scenario (v2.x).
 # 5 independent sub-tests with continued-on-failure semantics:
-#   (a) embedder set, digest absent → misconfigured (missing: "digest")
+#   (a) embedder set, digest absent → fts-raw + digest-disabled warning
 #   (b) digest set, embedder absent → misconfigured (missing: "embedder")
-#   (c) both broken (legacy bedrock embedder + digest configured but no model)
-#   (d) warm-path: start digest-hybrid, remove digest.json, /reload → misconfigured
+#   (c) both broken (legacy bedrock embedder + invalid digest model)
+#   (d) warm-path: start digest-hybrid, remove digest.json, /reload → fts-raw
 #   (e) legacy-bedrock + no-digest-intent → fts-raw (NOT misconfigured)
 
 set -euo pipefail
@@ -18,14 +17,13 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sub-test (a): embedder set, digest absent → missing: "digest"
+# Sub-test (a): embedder set, digest absent → fts-raw + warning
 # ──────────────────────────────────────────────────────────────────────────────
 sub_test_a() {
   local my_failed=0
   scn_setup "s02-a"
   scn_setup_clean_home "s02-a"
 
-  # Write config.json with embedder, deliberately NO digest.json
   scn_setup_embedder_config '{
     "embedder": {
       "baseUrl": "http://127.0.0.1:9999",
@@ -35,61 +33,44 @@ sub_test_a() {
   }'
 
   scn_pi_start_session_search
-  sleep 4  # allow verdict resolution + notify propagation
+  sleep 4
 
   echo "==== S02 (a) results ===="
-
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
 
-  # 1. Status/notify: misconfigured (no digest model)
-  if grep -qE "misconfigured.*digest|no digest model" "$PANE_LOG"; then
-    scn_pass "S02(a): misconfigured notify visible (no digest model)"
+  if grep -qE "Digest disabled.*session:summarizer" "$PANE_LOG"; then
+    scn_pass "S02(a): digest-disabled footer points to explicit setup"
   else
-    scn_fail "S02(a): misconfigured notify missing"
+    scn_fail "S02(a): digest-disabled footer missing"
     my_failed=1
   fi
 
-  # 2. Remediation message mentions digest.json
-  if grep -qE "Configure.*\.pi/session-search/digest\.json" "$PANE_LOG"; then
-    scn_pass "S02(a): remediation suggests digest.json config"
-  else
-    scn_fail "S02(a): remediation missing digest.json reference"
+  if grep -qE "session-search: misconfigured" "$PANE_LOG"; then
+    scn_fail "S02(a): embedder-only config must not block fts-raw"
     my_failed=1
+  else
+    scn_pass "S02(a): embedder-only config stays in fts-raw"
   fi
 
-  # 3. /find-session invocation emits remediation (send-keys approach)
-  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/find-session test"
+  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:digest"
   "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
   sleep 2
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
-  if grep -qE "misconfigured.*digest|no digest model" "$PANE_LOG"; then
-    scn_pass "S02(a): /find-session shows remediation"
+  if grep -qE "Digest disabled.*session:summarizer" "$PANE_LOG"; then
+    scn_pass "S02(a): digest command returns actionable remediation"
   else
-    scn_fail "S02(a): /find-session did not show remediation"
+    scn_fail "S02(a): digest command remediation missing"
     my_failed=1
   fi
 
-  # 4. /session:summarizer works normally (recovery command, no short-circuit)
-  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:summarizer"
-  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
-  sleep 2
-  "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
-  if grep -qE "Digest config created|Digest config exists|Edit it then run /reload" "$PANE_LOG"; then
-    scn_pass "S02(a): /session:summarizer works normally (recovery command)"
-  else
-    scn_fail "S02(a): /session:summarizer did not show expected output"
-    my_failed=1
-  fi
-
-  # 5. Best-effort: send search prompt to trigger session_search tool
-  #    (model must be available for this to work)
   scn_send "search sessions for test query please"
   sleep 3
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
-  if grep -qE "misconfigured|no digest model|Configure.*digest\.json" "$PANE_LOG"; then
-    scn_pass "S02(a): session_search tool returns remediation (via model)"
+  if grep -qE "session-search: misconfigured" "$PANE_LOG"; then
+    scn_fail "S02(a): session_search blocked instead of using fts-raw"
+    my_failed=1
   else
-    echo "  INFO: S02(a): session_search tool assertion skipped (model may not have called tool)"
+    scn_pass "S02(a): session_search remains on fts-raw path"
   fi
 
   scn_pi_stop
@@ -224,15 +205,13 @@ sub_test_c() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sub-test (d): warm-path transition. Start digest-hybrid, remove digest.json,
-#               /reload, assert misconfigured status + tool remediation.
+# Sub-test (d): warm-path digest-hybrid → fts-raw after digest config removal.
 # ──────────────────────────────────────────────────────────────────────────────
 sub_test_d() {
   local my_failed=0
   scn_setup "s02-d"
   scn_setup_clean_home "s02-d"
 
-  # Both config files present → digest-hybrid on first boot
   scn_setup_embedder_config '{
     "embedder": {
       "baseUrl": "http://127.0.0.1:9999",
@@ -246,42 +225,42 @@ sub_test_d() {
   sleep 4
 
   echo "==== S02 (d) results ===="
-
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
-
-  # 1. First boot: digest-hybrid, no misconfigured error
-  if grep -qE "misconfigured" "$PANE_LOG"; then
-    # If legacy-rejection or other notify snuck in, log but don't fail yet
-    echo "  INFO: S02(d): initial pane shows misconfigured (unexpected backup path — may pass)"
+  if grep -qE "session-search: misconfigured" "$PANE_LOG"; then
+    scn_fail "S02(d): initial digest-hybrid boot is misconfigured"
+    my_failed=1
   else
-    scn_pass "S02(d): first boot shows no misconfigured (digest-hybrid expected)"
+    scn_pass "S02(d): initial digest-hybrid boot is valid"
   fi
 
-  # 2. Remove digest.json, send /reload
   rm -f "$SCN_TEMP_HOME/digest.json"
   "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/reload"
   "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
-  sleep 5  # wait for reload + re-verdict + notify
-
+  sleep 5
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
 
-  # 3. After /reload: misconfigured notify visible (missing: "digest")
-  if grep -qE "misconfigured.*digest|no digest model|Configure.*digest\.json" "$PANE_LOG"; then
-    scn_pass "S02(d): after /reload, misconfigured notify visible (missing digest)"
+  if grep -qE "Digest disabled.*session:summarizer" "$PANE_LOG"; then
+    scn_pass "S02(d): reload shows digest-disabled footer"
   else
-    scn_fail "S02(d): misconfigured notify not visible after /reload"
+    scn_fail "S02(d): reload digest-disabled footer missing"
     my_failed=1
   fi
 
-  # 4. /find-session now returns remediation
-  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/find-session test"
+  if grep -qE "session-search: misconfigured" "$PANE_LOG"; then
+    scn_fail "S02(d): removal should transition to fts-raw, not misconfigured"
+    my_failed=1
+  else
+    scn_pass "S02(d): removal transitions to fts-raw"
+  fi
+
+  "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" -- "/session:update"
   "${TMUX_CMD[@]}" send-keys -t "$SESSION:0" Enter
   sleep 2
   "${TMUX_CMD[@]}" capture-pane -t "$SESSION:0" -p -S -2000 > "$PANE_LOG"
-  if grep -qE "misconfigured|no digest model|Configure.*digest\.json" "$PANE_LOG"; then
-    scn_pass "S02(d): /find-session returns remediation after transition"
+  if grep -qE "Digest disabled.*FTS session search remains available" "$PANE_LOG"; then
+    scn_pass "S02(d): digest update is disabled while FTS stays available"
   else
-    scn_fail "S02(d): /find-session did not return remediation after transition"
+    scn_fail "S02(d): digest update remediation missing after transition"
     my_failed=1
   fi
 

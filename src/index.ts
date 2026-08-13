@@ -77,6 +77,9 @@ let currentRollup: CostRollup = emptyRollup();
 	let syncTimer: ReturnType<typeof setInterval> | null = null;
 
 	const SYNC_INTERVAL_MS = 5 * 60 * 1000;
+	const DIGEST_DISABLED_STATUS = "Digest disabled: run /session:summarizer";
+	const DIGEST_DISABLED_MESSAGE =
+		"Digest disabled: run /session:summarizer to configure a model. FTS session search remains available.";
 
 	// ── Cost tracker adapter for lifecycle ────────────────────────────────────
 	const lifecycleCostTracker = {
@@ -192,6 +195,13 @@ let currentRollup: CostRollup = emptyRollup();
 
 		// Step 3: create embedder (synchronous; legacy-rejection notify fires inside)
 		currentDigestConfig = loadDigestConfig(lastCwd);
+		const digestConfigured = Boolean(
+			currentDigestConfig.provider && currentDigestConfig.model,
+		);
+		ctx.ui.setStatus(
+			"session-digest",
+			digestConfigured ? "" : DIGEST_DISABLED_STATUS,
+		);
 		const embedder = currentConfig?.embedder
 			? createEmbedder(currentConfig.embedder, (msg, level) =>
 					ctx.ui.notify(msg, level as any),
@@ -467,10 +477,7 @@ let currentRollup: CostRollup = emptyRollup();
 				return;
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
-				ctx.ui.notify(
-					"Digest mode unavailable: not in digest-hybrid mode. Run /session:summarizer to configure.",
-					"warning",
-				);
+				ctx.ui.notify(DIGEST_DISABLED_MESSAGE, "warning");
 				return;
 			}
 			if (!lifecycleHandle) {
@@ -506,7 +513,7 @@ let currentRollup: CostRollup = emptyRollup();
 				return;
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
-				ctx.ui.notify("No digest available (not in digest-hybrid mode).", "info");
+				ctx.ui.notify(DIGEST_DISABLED_MESSAGE, "warning");
 				return;
 			}
 			const sessionId = ctx.sessionManager.getSessionId();
@@ -536,10 +543,7 @@ let currentRollup: CostRollup = emptyRollup();
 				return;
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
-				ctx.ui.notify(
-					"Digest mode unavailable: not in digest-hybrid mode. Run /session:summarizer to configure.",
-					"warning",
-				);
+				ctx.ui.notify(DIGEST_DISABLED_MESSAGE, "warning");
 				return;
 			}
 			if (!lifecycleHandle) {
@@ -577,10 +581,7 @@ let currentRollup: CostRollup = emptyRollup();
 				return;
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
-				ctx.ui.notify(
-					"Backfill requires digest-hybrid mode. Run /session:summarizer to configure.",
-					"warning",
-				);
+				ctx.ui.notify(DIGEST_DISABLED_MESSAGE, "warning");
 				return;
 			}
 
@@ -670,7 +671,7 @@ let currentRollup: CostRollup = emptyRollup();
 				return;
 			}
 			if (currentVerdict?.kind !== "digest-hybrid") {
-				ctx.ui.notify("No digest cost recorded (not in digest-hybrid mode).", "info");
+				ctx.ui.notify(DIGEST_DISABLED_MESSAGE, "warning");
 				return;
 			}
 			if (currentRollup.calls === 0) {
@@ -1194,7 +1195,7 @@ export {
 	getDigestConfigPath,
 } from "./digest/config";
 export type { DigestConfig } from "./digest/config";
-export { resolveModel, AUTO_DETECT_MODELS } from "./digest/model-resolver";
+export { resolveModel } from "./digest/model-resolver";
 export { emptyRollup, record as recordCost, format as formatCost } from "./digest/cost-tracker";
 export type { CostRollup } from "./digest/cost-tracker";
 export {

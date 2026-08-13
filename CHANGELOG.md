@@ -8,6 +8,8 @@ Added a process-wide structured logger (pino + `rotating-file-stream`) so SQLite
 
 ### What's new
 
+- **Explicit digest model required** — removed automatic model selection. Digest generation now requires both `provider` and `model` in `digest.json` plus a valid `digest-hybrid` verdict; missing, partial, or otherwise invalid prerequisites never dispatch an LLM request. Without digest intent, raw FTS remains available even when an embedder is configured.
+- **Digest-disabled footer** — when no digest model is configured, Pi shows `Digest disabled: run /session:summarizer` under the dedicated `session-digest` status key. The warning is UI-only and never enters session content or the search index.
 - **`src/log.ts`** — lazy pino logger, JSON-per-line, default path `~/.pi/agent/session-search.log`, rotation at 10 MiB × 2 backups (≈30 MiB ceiling).
 - **`dbCall(op, fields, fn)` helper** — wraps SQLite calls; logs `op`/`db`/`durationMs` on success, `code`/`errno`/`sqliteCode` on error. Wired through every transaction boundary, schema op, and search query in `FtsSide`, `FtsSessionIndex`, and the migration paths in `session-index.ts`.
 - **Transaction safety** — every `BEGIN` block now has matching `ROLLBACK`-on-throw so a SQLITE_BUSY mid-transaction doesn't leak an open transaction across the next op.

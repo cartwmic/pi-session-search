@@ -12,14 +12,15 @@ import { sessionSearchHome } from "../utils"
 /**
  * Operating mode, auto-detected from config (task 5.7).
  *
- *   fts-raw       — no embedder, no digest model → BM25 keyword search only.
- *                   FTS indexes raw session content only.
+ *   fts-raw       — no explicit digest intent → BM25 keyword search only.
+ *                   FTS indexes raw session content only; any standalone
+ *                   embedder configuration is ignored until digest config exists.
  *   digest-hybrid — embedder + digest model both configured →
  *                   cosine over digest-body embeddings + BM25 over
  *                   (digest body, raw content) weighted columns.
  *
- * Partial configuration (exactly one of embedder / digest model) is NOT
- * a legal Mode — it produces a misconfigured Verdict instead.
+ * Digest intent without both a working embedder and resolvable explicit model
+ * is NOT a legal Mode — it produces a misconfigured Verdict instead.
  */
 export type Mode = "fts-raw" | "digest-hybrid"
 
@@ -133,8 +134,9 @@ interface SyncVerdictInput {
 function computeVerdictSync(input: SyncVerdictInput): Verdict {
   const { embedderAvailable, digestModelResolved, digestRequested: requested } = input
 
-  // No embedder, no digest intent → fts-raw
-  if (!embedderAvailable && !requested) {
+  // No digest intent → fts-raw, regardless of standalone embedder config.
+  // Digest configuration is the explicit opt-in boundary.
+  if (!requested) {
     return { kind: "fts-raw" }
   }
 
