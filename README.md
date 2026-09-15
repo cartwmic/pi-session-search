@@ -85,6 +85,8 @@ Requires an embedder and an explicit digest model configuration. Run `/session:s
 
 `provider` and `model` are required; remaining fields are optional (shown with defaults). Missing or partial model configuration disables digest generation. Run `/session:summarizer` to create a valid file.
 
+After selecting or changing the digest model with `/session:summarizer`, run `/reload` to activate it in the current session. The command saves the configuration, but the running summarizer keeps its previously loaded model until reload. Then run `/session:update` to generate a digest with the new model. Other open Pi sessions also need `/reload` to pick up the change. Switching the chat model with `/model` does not change the digest model.
+
 After setup, run `/session:backfill` to digest historical sessions. New sessions are digested live with a 60-second debounce after each agent turn.
 
 ## Usage
