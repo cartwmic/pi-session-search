@@ -401,6 +401,10 @@ export class SessionIndex {
   /** True after dispose() — subsequent method calls are no-ops. */
   private disposed: boolean = false;
 
+  /** mtimeMs of session-index.json at our last read/write — cheap freshness
+   *  probe for mergeFromDisk(). undefined until first load/save. */
+  private lastKnownIndexMtimeMs: number | undefined = undefined;
+
   /**
    * Mutex: while true, the periodic 5-min sync() returns early without work.
    * Set by backfill; cleared on completion. See task 6.6.
@@ -461,6 +465,7 @@ export class SessionIndex {
       if (parsed.version === INDEX_VERSION) {
         // (b) normal load
         this.data = parsed;
+        this.lastKnownIndexMtimeMs = statSync(this.indexPath).mtimeMs;
         // Ensure vectorDim field exists (may be absent in early v4 files)
         if (this.data.vectorDim === undefined) this.data.vectorDim = 0;
 
@@ -595,6 +600,52 @@ export class SessionIndex {
     const data = JSON.stringify(this.data)
     writeFileSync(this.indexPath + ".tmp", data, "utf8")
     renameSync(this.indexPath + ".tmp", this.indexPath)
+    try {
+      this.lastKnownIndexMtimeMs = statSync(this.indexPath).mtimeMs;
+    } catch {
+      /* best effort — next mergeFromDisk just re-reads */
+    }
+  }
+
+  /**
+   * Merge the on-disk index into memory so concurrent pi processes converge.
+   *
+   * Every pi process holds its own in-memory copy of the shared index file.
+   * Without this merge, when process A re-embeds a session and saves, every
+   * other process still compares against its stale in-memory sizeBytes and
+   * re-parses/re-embeds/re-upserts the same content every sync cycle —
+   * redundant synchronous SQLite bursts that freeze the TUI.
+   *
+   * Merge rule: adopt a disk entry when it is missing locally or its
+   * sizeBytes is strictly larger (another process embedded newer content).
+   * Never revert fresher local work. In-memory-only entries (backfill's
+   * batched adds) are preserved; sync() skips merging during backfill anyway.
+   *
+   * Cheap when nothing changed: a statSync against the mtime recorded at our
+   * last load/save short-circuits before any read.
+   */
+  private mergeFromDisk(): void {
+    if (this.disposed) return;
+    let mtimeMs: number;
+    try {
+      const st = statSync(this.indexPath);
+      if (st.mtimeMs === this.lastKnownIndexMtimeMs) return; // no other writer
+      this.lastKnownIndexMtimeMs = st.mtimeMs;
+    } catch {
+      return; // index file absent or unreadable
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(this.indexPath, "utf8")) as IndexData;
+      if (parsed.version !== INDEX_VERSION || !parsed.sessions) return;
+      for (const [id, diskEntry] of Object.entries(parsed.sessions)) {
+        const mem = this.data.sessions[id];
+        if (!mem || (diskEntry.sizeBytes ?? 0) > (mem.sizeBytes ?? 0)) {
+          this.data.sessions[id] = diskEntry;
+        }
+      }
+    } catch {
+      /* best effort — corrupt/partial read keeps current state */
+    }
   }
 
   /**
@@ -633,6 +684,11 @@ export class SessionIndex {
     if (this.backfillInProgress) {
       return { added: 0, updated: 0, removed: 0, moved: 0 };
     }
+
+    // Converge with other running pi processes before comparing (see
+    // mergeFromDisk): adopt fresher on-disk state so we don't re-embed
+    // sessions another process already processed.
+    this.mergeFromDisk();
 
     const discovered = discoverSessionFiles(
       this.extraSessionDirs,
