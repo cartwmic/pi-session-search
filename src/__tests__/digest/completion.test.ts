@@ -39,92 +39,59 @@ function makeResponse() {
 }
 
 describe("resolveHostCompleteFn", () => {
+	it("uses the registry to normalize digest prompts and tools before dispatch", async () => {
+		const model = makeModel("openai-codex", "openai-codex-responses");
+		const response = makeResponse();
+		const context = {
+			systemPrompt: "You are a session digest writer",
+			messages: [{ role: "user", content: [{ type: "text", text: "Summarize this session" }] }],
+			tools: [{ name: "submit_digest", description: "Submit a digest", parameters: {} }],
+		};
+		let registryCalls = 0;
+		const registry: HostModelRegistry = {
+			getProvider: () => ({ stream: () => { throw new Error("raw provider dispatch bypassed normalization"); } }),
+			stream(requestModel, requestContext) {
+				registryCalls++;
+				assert.equal(requestModel, model);
+				assert.equal(requestContext, context);
+				return { result: async () => response };
+			},
+		};
+
+		const complete = await resolveHostCompleteFn(registry, model);
+		assert.equal(await complete(model, context), response);
+		assert.equal(registryCalls, 1);
+	});
+
 	it("dispatches a custom API through Pi's effective extension provider", async () => {
 		const model = makeModel("claude-bridge", "claude-bridge");
 		const response = makeResponse();
-		let capturedModel: any;
-		let capturedOptions: any;
+		const signal = new AbortController().signal;
 		let streamCalls = 0;
-
 		const registry: HostModelRegistry = {
 			getProvider(providerId) {
 				assert.equal(providerId, "claude-bridge");
-				return {
-					stream(requestModel, _context, options) {
-						streamCalls++;
-						capturedModel = requestModel;
-						capturedOptions = options;
-						return { result: async () => response };
-					},
-				};
+				return {};
 			},
-			async getApiKeyAndHeaders() {
-				return {
-					ok: true,
-					apiKey: "not-used",
-					headers: { "X-Provider": "bridge" },
-					env: { BRIDGE_ENV: "host" },
-				};
-			},
-			async getProviderAuth() {
-				return {
-					auth: { baseUrl: "claude-bridge" },
-					env: { AUTH_ENV: "resolved" },
-				};
+			stream(requestModel, context, options) {
+				streamCalls++;
+				assert.equal(requestModel, model);
+				assert.deepEqual(context, { messages: [] });
+				assert.equal(options?.signal, signal);
+				return { result: async () => response };
 			},
 		};
 
 		const complete = await resolveHostCompleteFn(registry, model);
-		const actual = await complete(
-			model,
-			{ messages: [] },
-			{
-				headers: { "X-Request": "digest" },
-				env: { BRIDGE_ENV: "request" },
-			},
-		);
-
-		assert.equal(actual, response);
+		assert.equal(await complete(model, { messages: [] }, { signal }), response);
 		assert.equal(streamCalls, 1);
-		assert.equal(capturedModel.baseUrl, "claude-bridge");
-		assert.equal(capturedOptions.apiKey, "not-used");
-		assert.deepEqual(capturedOptions.headers, {
-			"X-Provider": "bridge",
-			"X-Request": "digest",
-		});
-		assert.deepEqual(capturedOptions.env, {
-			AUTH_ENV: "resolved",
-			BRIDGE_ENV: "request",
-		});
-	});
-
-	it("dispatches a built-in provider through the same host path", async () => {
-		const model = makeModel("anthropic", "anthropic-messages");
-		let called = false;
-		const registry: HostModelRegistry = {
-			getProvider() {
-				return {
-					stream() {
-						called = true;
-						return { result: async () => makeResponse() };
-					},
-				};
-			},
-			async getApiKeyAndHeaders() {
-				return { ok: true, apiKey: "sk-test" };
-			},
-		};
-
-		const complete = await resolveHostCompleteFn(registry, model);
-		await complete(model, { messages: [] });
-		assert.equal(called, true);
 	});
 
 	it("fails before generation when host provider is missing", async () => {
 		const model = makeModel("missing", "missing-api");
 		const registry: HostModelRegistry = {
 			getProvider: () => undefined,
-			getApiKeyAndHeaders: async () => ({ ok: true }),
+			stream: () => { throw new Error("should not dispatch"); },
 		};
 
 		await assert.rejects(
@@ -133,21 +100,15 @@ describe("resolveHostCompleteFn", () => {
 		);
 	});
 
-	it("surfaces host auth resolution errors", async () => {
+	it("returns host error responses for the builder to report", async () => {
 		const model = makeModel("cursor", "openai-responses");
+		const response = { ...makeResponse(), stopReason: "error", errorMessage: "OAuth token expired" };
 		const registry: HostModelRegistry = {
-			getProvider: () => ({
-				stream: () => ({ result: async () => makeResponse() }),
-			}),
-			getApiKeyAndHeaders: async () => ({
-				ok: false,
-				error: "OAuth token expired",
-			}),
+			getProvider: () => ({}),
+			stream: () => ({ result: async () => response }),
 		};
 
-		await assert.rejects(
-			resolveHostCompleteFn(registry, model),
-			/OAuth token expired/,
-		);
+		const complete = await resolveHostCompleteFn(registry, model);
+		assert.equal(await complete(model, { messages: [] }), response);
 	});
 });
