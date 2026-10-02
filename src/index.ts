@@ -175,6 +175,17 @@ let currentRollup: CostRollup = emptyRollup();
 
 	pi.on("session_start", async (_event, ctx) => {
 		const myGen = ++bootGeneration;
+		// ctx goes stale once this session shuts down or is replaced. Async work
+		// started here can outlive it (headless runs exit right after startup),
+		// so every UI call checks that this session is still current.
+		const ui = {
+			notify: (msg: string, level?: "info" | "warning" | "error") => {
+				if (myGen === bootGeneration) ctx.ui.notify(msg, level);
+			},
+			setStatus: (key: string, text: string | undefined) => {
+				if (myGen === bootGeneration) ctx.ui.setStatus(key, text);
+			},
+		};
 		lastCwd = ctx.cwd || process.cwd();
 
 		// Step 1: load config
@@ -182,7 +193,7 @@ let currentRollup: CostRollup = emptyRollup();
 			currentConfig = loadConfig();
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			ctx.ui.notify(`session-search: ${msg}`, "warning");
+			ui.notify(`session-search: ${msg}`, "warning");
 		}
 
 		// Step 2: migration (data-plane only — task 2.4a)
@@ -198,13 +209,13 @@ let currentRollup: CostRollup = emptyRollup();
 		const digestConfigured = Boolean(
 			currentDigestConfig.provider && currentDigestConfig.model,
 		);
-		ctx.ui.setStatus(
+		ui.setStatus(
 			"session-digest",
 			digestConfigured ? "" : DIGEST_DISABLED_STATUS,
 		);
 		const embedder = currentConfig?.embedder
 			? createEmbedder(currentConfig.embedder, (msg, level) =>
-					ctx.ui.notify(msg, level as any),
+					ui.notify(msg, level as any),
 				)
 			: null;
 
@@ -236,7 +247,7 @@ let currentRollup: CostRollup = emptyRollup();
 
 		// Step 8: migration notify resolver (post-verdict — task 2.4a)
 		if (migrationMeta.didMigrate) {
-			ctx.ui.notify(
+			ui.notify(
 				`session-search: index version ${migrationMeta.migratedFrom} is incompatible; reset to v4. Run /session:backfill to repopulate.`,
 				"info",
 			);
@@ -244,8 +255,8 @@ let currentRollup: CostRollup = emptyRollup();
 
 		// Step 9: misconfigured → setStatus + notify + console.error, return
 		if (verdict.kind === "misconfigured") {
-			ctx.ui.setStatus("session-search", verdict.statusLine);
-			ctx.ui.notify(verdict.notifyMessage, "error");
+			ui.setStatus("session-search", verdict.statusLine);
+			ui.notify(verdict.notifyMessage, "error");
 			console.error(verdict.notifyMessage);
 			lifecycleHandle?.deactivate();
 			return;
@@ -270,26 +281,27 @@ let currentRollup: CostRollup = emptyRollup();
 
 		await sessionIndex.load(
 			verdict.kind === "digest-hybrid" // only SessionIndex needs notify for mode transitions
-				? (msg, level) => ctx.ui.notify(msg, level as any)
+				? (msg, level) => ui.notify(msg, level as any)
 				: undefined,
 			currentConfig?.embedder,
 		);
+		if (myGen !== bootGeneration) return;
 
 		// Fire-and-forget initial sync with generation guard (task 2.6)
 		const syncGen = bootGeneration;
 		const SYNC_TIMEOUT_MS = 600_000;
 		Promise.race([
-			sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
-			new Promise<null>((r) => setTimeout(() => r(null), SYNC_TIMEOUT_MS)),
+			sessionIndex.sync((msg) => ui.setStatus("session-search", msg)),
+			new Promise<null>((r) => setTimeout(() => r(null), SYNC_TIMEOUT_MS).unref()),
 		])
 			.then((syncResult) => {
 				if (syncGen !== bootGeneration) return; // stale — task 2.6
 				if (syncResult === null) {
-					ctx.ui.notify(
+					ui.notify(
 						"session-search: sync timed out (index may be stale)",
 						"warning",
 					);
-					ctx.ui.setStatus("session-search", "");
+					ui.setStatus("session-search", "");
 				} else {
 					const { added, updated, removed, moved } = syncResult;
 					const changes = added + updated + removed + moved;
@@ -299,19 +311,19 @@ let currentRollup: CostRollup = emptyRollup();
 						if (updated) parts.push(`~${updated}`);
 						if (removed) parts.push(`-${removed}`);
 						if (moved) parts.push(`↗${moved} moved`);
-						ctx.ui.setStatus(
+						ui.setStatus(
 							"session-search",
 							`Sessions: ${parts.join(" ")} (${sessionIndex!.size()} total)`,
 						);
 						if (syncGen === bootGeneration) {
 							setTimeout(() => {
 								if (syncGen !== bootGeneration) return; // stale guard
-								ctx.ui.setStatus("session-search", "");
+								ui.setStatus("session-search", "");
 							}, 5000);
 						}
 					} else {
 						if (syncGen === bootGeneration) {
-							ctx.ui.setStatus("session-search", "");
+							ui.setStatus("session-search", "");
 						}
 					}
 				}
@@ -319,8 +331,8 @@ let currentRollup: CostRollup = emptyRollup();
 			.catch((err: unknown) => {
 				if (syncGen !== bootGeneration) return; // stale
 				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`session-search: initial sync failed: ${msg}`, "warning");
-				ctx.ui.setStatus("session-search", "");
+				ui.notify(`session-search: initial sync failed: ${msg}`, "warning");
+				ui.setStatus("session-search", "");
 			});
 
 		// Periodic sync with generation guard (task 2.10)
@@ -340,14 +352,14 @@ let currentRollup: CostRollup = emptyRollup();
 					if (result.updated) parts.push(`~${result.updated}`);
 					if (result.removed) parts.push(`-${result.removed}`);
 					if (result.moved) parts.push(`↗${result.moved}`);
-					ctx.ui.setStatus(
+					ui.setStatus(
 						"session-search",
 						`Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`,
 					);
 					if (syncGen === bootGeneration) {
 						setTimeout(() => {
 							if (syncGen !== bootGeneration) return; // stale guard
-							ctx.ui.setStatus("session-search", "");
+							ui.setStatus("session-search", "");
 						}, 5000);
 					}
 				}
@@ -378,6 +390,7 @@ let currentRollup: CostRollup = emptyRollup();
 
 	// ── session_shutdown (task 2.11) — calls lifecycleHandle.dispose() ──────
 	pi.on("session_shutdown", async () => {
+		bootGeneration++; // invalidate async work holding this session's ctx
 		lifecycleHandle?.dispose();
 		lifecycleHandle = null;
 
