@@ -3,9 +3,10 @@
 import json
 import os
 from pathlib import Path
-import selectors
+import queue
 import subprocess
 import tempfile
+import threading
 import time
 
 repo = Path(__file__).resolve().parents[2]
@@ -32,8 +33,17 @@ with tempfile.TemporaryDirectory(prefix="pi-session-search-blackbox-") as temp:
     with (root / "stderr.log").open("w+") as errors:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
                                 text=True, env=env, cwd=root)
-        selector = selectors.DefaultSelector()
-        selector.register(proc.stdout, selectors.EVENT_READ)
+        lines = queue.Queue()
+
+        def read_stdout():
+            # readline may prefetch several lines; selecting the underlying fd
+            # would miss lines already buffered by TextIOWrapper.
+            for line in proc.stdout:
+                lines.put(line)
+            lines.put(None)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
 
         def send(message):
             proc.stdin.write(json.dumps(message) + "\n")
@@ -42,12 +52,11 @@ with tempfile.TemporaryDirectory(prefix="pi-session-search-blackbox-") as temp:
         def receive_until(predicate, timeout=30):
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                if not selector.select(timeout=0.2):
-                    if proc.poll() is not None:
-                        break
+                try:
+                    line = lines.get(timeout=0.2)
+                except queue.Empty:
                     continue
-                line = proc.stdout.readline()
-                if not line:
+                if line is None:
                     break
                 print(line.rstrip(), flush=True)
                 message = json.loads(line)
@@ -86,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix="pi-session-search-blackbox-") as temp:
             except subprocess.TimeoutExpired:
                 proc.terminate()
                 exit_code = proc.wait(timeout=10)
-            selector.close()
+            reader.join(timeout=1)
             errors.seek(0)
             stderr = errors.read()
             if stderr:
