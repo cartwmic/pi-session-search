@@ -1,7 +1,7 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
@@ -85,6 +85,47 @@ it("digest JSON sync adopts another indexer's on-disk metadata before comparing 
   } finally {
     a.dispose();
     b.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("empty sessions are persisted once instead of re-ingested on every digest sync", async () => {
+  const root = mkdtempSync(join(tmpdir(), "digest-orphan-"));
+  const sessions = join(root, "sessions", "--tmp-proj--");
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(join(sessions, "empty.jsonl"), JSON.stringify({ type: "session", id: "empty", timestamp: "2026-01-15T10:00:00Z", cwd: "/tmp/proj" }) + "\n");
+  const embedder = { embed: async () => { throw new Error("empty sessions must not embed"); }, embedBatch: async () => [] };
+  const index = new SessionIndex(embedder, join(root, "index"), [], [], "digest-hybrid", join(root, "sessions"), join(root, "archive"));
+  try {
+    await index.load();
+    await index.sync();
+    assert.equal(index.size(), 1);
+    assert.ok(JSON.parse(readFileSync(join(root, "index/session-index.json"), "utf8")).sessions.empty);
+    const progress: string[] = [];
+    await index.sync((message) => progress.push(message));
+    assert.deepEqual(progress, [], "unchanged orphan is not re-parsed");
+  } finally {
+    index.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("digest sync enumerates the reverse lookup once, not once per discovered file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "digest-reverse-map-"));
+  const embedder = { embed: async () => [1, 0, 0], embedBatch: async () => [] };
+  const index = new SessionIndex(embedder, join(root, "index"), [], [], "digest-hybrid", join(root, "sessions"), join(root, "archive"));
+  try {
+    for (let i = 0; i < 64; i++) writeSession(join(root, "sessions", "--tmp-proj--"), `reverse-${i}`, "reverse map fixture");
+    await index.load();
+    await index.sync();
+    let enumerations = 0;
+    const data = (index as any).data;
+    data.sessions = new Proxy(data.sessions, { ownKeys(target) { enumerations++; return Reflect.ownKeys(target); } });
+    assert.deepEqual(await index.sync(), { added: 0, updated: 0, removed: 0, moved: 0 });
+    assert.ok(enumerations <= 3, `index enumerated ${enumerations} times for 64 files`);
+    assert.equal(index.size(), 64);
+  } finally {
+    index.dispose();
     rmSync(root, { recursive: true, force: true });
   }
 });
