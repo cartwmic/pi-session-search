@@ -1,17 +1,20 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { Model, Api } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Model, Api } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 
 // ── Config / index infrastructure ──────────────────────────────────────────
 import { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
 import type { Config } from "./config";
 import type { EmbedderConfig } from "./embedder";
 import { createEmbedder } from "./embedder";
-import { SessionIndex, migrateIndexFileIfStale } from "./index/session-index";
-import type { MigrationMetadata } from "./index/session-index";
-import { FtsSessionIndex } from "./index/fts-index";
+import { createIndexService, spawnIndexWorker } from "./index-service";
+import type { IndexService } from "./index-service";
+import { DEFAULT_SYNC_INTERVAL_MS, DEFAULT_INITIAL_DELAY_MS } from "./config";
+
 import { resolveModeVerdict } from "./index/mode";
 import type { Verdict } from "./index/mode";
 
@@ -57,7 +60,65 @@ import { registerFindSessionCommand } from "./search/overlay";
 import { truncate, pathToSlug, formatRelativeDate } from "./utils";
 import { log, getLogPath } from "./log";
 
-type AnyIndex = SessionIndex | FtsSessionIndex;
+const INDEX_WORKER_FILE = fileURLToPath(new URL("../dist/index-worker.js", import.meta.url));
+let useIndexWorker = true;
+let indexWorkerFile = INDEX_WORKER_FILE;
+export function _setIndexWorkerEnabled(enabled: boolean, file = INDEX_WORKER_FILE): void {
+  useIndexWorker = enabled;
+  indexWorkerFile = file;
+}
+export function resolveSyncAction(rawInterval?: number): {
+  disabled: boolean;
+  intervalMs?: number;
+  fallback?: boolean;
+} {
+  if (rawInterval === undefined)
+    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS };
+  if (rawInterval === -1) return { disabled: true };
+  if (rawInterval <= 0) {
+    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS, fallback: true };
+  }
+  return { disabled: false, intervalMs: rawInterval };
+}
+
+/**
+ * Resolve the initial startup sync delay and return the action.
+ *
+ * - `undefined` → silent default immediate (no warning)
+ * - `-1` → `{ skip: true }` (no initial sync)
+ * - `>= 0` → `{ skip: false, delayMs: <value> }` (sync after N ms, 0 = immediate)
+ * - other < 0 → `{ skip: false, delayMs: DEFAULT, fallback: true }` (warn + default)
+ */
+export function resolveInitialSyncAction(rawDelay?: number): {
+  skip: boolean;
+  delayMs?: number;
+  fallback?: boolean;
+} {
+  if (rawDelay === undefined)
+    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS };
+  if (rawDelay === -1) return { skip: true };
+  if (rawDelay < 0) {
+    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS, fallback: true };
+  }
+  return { skip: false, delayMs: rawDelay };
+}
+
+/**
+ * Detect whether this pi process is a child subagent or non-interactive
+ * programmatic invocation.
+ *
+ * Signals checked (any one triggers):
+ * - `PI_SUBAGENT_DEPTH > 0` — official pi-subagents child marker
+ * - `!process.stdin.isTTY` — non-interactive terminal (CI/CD, pipes, SDK embedders)
+ */
+export function isChildProcess(): boolean {
+  const depth = Number(process.env.PI_SUBAGENT_DEPTH);
+  if (depth > 0) return true;
+  if (!process.stdin.isTTY) return true;
+  return false;
+}
+
+
 
 export default function (pi: ExtensionAPI) {
 	// One-time startup log so users can confirm the logger is alive and find
@@ -65,7 +126,18 @@ export default function (pi: ExtensionAPI) {
 	log.info({ comp: "extension", logPath: getLogPath() }, "pi-session-search loaded");
 
 	// ── Module-level state (tasks 2.3, 2.6) ─────────────────────────────────
-	let sessionIndex: AnyIndex | null = null;
+	let sessionIndex: IndexService | null = null;
+  let indexState: "off" | "loading" | "warming" | "ready" | "failed" = "off";
+  let indexError = "";
+  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+  function scheduleTimer(fn: () => void, ms: number) {
+    const generation = bootGeneration;
+    const timer = setTimeout(() => { pendingTimers.delete(timer); if (generation === bootGeneration) fn(); }, ms);
+    pendingTimers.add(timer);
+    return timer;
+  }
+  function warmingNote() { return indexState === "warming" ? "\n\nNote: session index warming (initial sync still running), so results may be incomplete." : ""; }
+  function unavailable() { return indexState === "failed" ? `Session index unavailable: ${indexError}` : "Session index warming (loading the saved index). Try again in a moment."; }
 	let currentConfig: Config | null = null;
 	let currentVerdict: Verdict | null = null;
 	let bootGeneration = 0;
@@ -97,70 +169,42 @@ let currentRollup: CostRollup = emptyRollup();
 	};
 
 	// ── indexAddDigested: lifecycle → SessionIndex bridge ─────────────────────
-	function indexAddDigested(
-		sessionId: string,
-		digest: SessionDigest,
-		opts?: { batched: boolean },
-	): void {
-		if (!(sessionIndex instanceof SessionIndex)) return;
-		const stored = sessionIndex.get(sessionId);
-		if (stored) {
-			void sessionIndex
-				.addDigested(sessionId, stored.session, digest, opts)
-				.catch((err) =>
-					log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed"),
-				);
-			return;
-		}
-		const files = discoverSessionFiles(
-			currentConfig?.extraSessionDirs ?? [],
-			currentConfig?.extraArchiveDirs ?? [],
-		);
-		for (const { file, archived } of files) {
-			if (readSessionId(file) === sessionId) {
-				const parsed = parseSession(file, archived);
-				if (parsed) {
-					void sessionIndex
-						.addDigested(sessionId, parsed, digest, opts)
-						.catch((err) =>
-							log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed (post-scan)"),
-						);
-				}
-				break;
-			}
-		}
-	}
+  function indexAddDigested(sessionId: string, digest: SessionDigest): void {
+    if (!sessionIndex || currentVerdict?.kind !== "digest-hybrid") return;
+    void sessionIndex.addDigest(sessionId, digest).catch((err) =>
+      log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed"));
+  }
 
 
 	// ── Session primer (task 2.9) — no longer uses currentMode ────────────────
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!sessionIndex || sessionIndex.size() === 0) return;
+		if (currentConfig?.primer?.enabled === false || !sessionIndex || await sessionIndex.size() === 0) return;
 
 		try {
 			const cwd = ctx.cwd || "";
 			const projectSlug = cwd ? pathToSlug(cwd) : undefined;
 
-			let sessions = sessionIndex.list({ project: projectSlug, limit: 5 });
+			let sessions = await sessionIndex.list({ project: projectSlug, limit: 5 });
 			if (sessions.length === 0 && projectSlug) {
-				sessions = sessionIndex.list({ limit: 5 });
+				sessions = await sessionIndex.list({ limit: 5 });
 			}
 			if (sessions.length === 0) return;
 
-			const lines = sessions.map((s) => {
+			const lines = await Promise.all(sessions.map(async (s) => {
 				let name: string;
-				if (currentVerdict?.kind === "digest-hybrid" && sessionIndex instanceof SessionIndex) {
-					const digest = sessionIndex.getDigest(s.id);
+				if (currentVerdict?.kind === "digest-hybrid") {
+					const digest = await sessionIndex!.getDigest(s.id);
 					name = digest ? digest.headline : truncate(s.firstUserMessage, 80);
 				} else {
 					name = s.name || truncate(s.firstUserMessage, 80);
 				}
 				const date = s.startedAt.split("T")[0];
 				const rel = formatRelativeDate(s.startedAt);
-				const displayCwd = s.cwd.replace(process.env.HOME || "", "~").slice(0, 60);
+				const displayCwd = s.cwd.replace(homedir(), "~").slice(0, 60);
 				const msgs = `${s.userMessageCount} user, ${s.assistantMessageCount} assistant`;
 				const modelTag = s.models[0] ? ` Mode: ${s.models[0].split("/").pop()}` : "";
 				return `- **${rel}**: **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${modelTag}`;
-			});
+			}));
 
 			const primer = `\n\n## Recent Sessions (this project)\n${lines.join("\n")}\n`;
 			const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
@@ -190,18 +234,10 @@ let currentRollup: CostRollup = emptyRollup();
 
 		// Step 1: load config
 		try {
-			currentConfig = loadConfig();
+			currentConfig = loadConfig(lastCwd);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			ui.notify(`session-search: ${msg}`, "warning");
-		}
-
-		// Step 2: migration (data-plane only — task 2.4a)
-		let migrationMeta: MigrationMetadata = { kind: "noop", didMigrate: false };
-		try {
-			migrationMeta = migrateIndexFileIfStale(getIndexDir());
-		} catch {
-			// migration failures are internal; index construction will handle
 		}
 
 		// Step 3: create embedder (synchronous; legacy-rejection notify fires inside)
@@ -235,23 +271,13 @@ let currentRollup: CostRollup = emptyRollup();
 		// Step 6: assign verdict
 		currentVerdict = verdict;
 
-		// Step 7: dispose prior index (abort in-flight embedder + close FtsSide)
-		if (sessionIndex) {
-			if (sessionIndex instanceof SessionIndex) {
-				sessionIndex.dispose();
-			} else {
-				sessionIndex.close();
-			}
-			sessionIndex = null;
-		}
-
-		// Step 8: migration notify resolver (post-verdict — task 2.4a)
-		if (migrationMeta.didMigrate) {
-			ui.notify(
-				`session-search: index version ${migrationMeta.migratedFrom} is incompatible; reset to v4. Run /session:backfill to repopulate.`,
-				"info",
-			);
-		}
+    if (syncTimer) clearInterval(syncTimer);
+    for (const timer of pendingTimers) clearTimeout(timer);
+    pendingTimers.clear();
+    await sessionIndex?.close();
+    if (myGen !== bootGeneration) return;
+    sessionIndex = null;
+    indexState = "loading";
 
 		// Step 9: misconfigured → setStatus + notify + console.error, return
 		if (verdict.kind === "misconfigured") {
@@ -262,111 +288,68 @@ let currentRollup: CostRollup = emptyRollup();
 			return;
 		}
 
-		// Step 10: construct new index + kick sync with generation guard
-		if (verdict.kind === "digest-hybrid" && embedder) {
-			sessionIndex = new SessionIndex(
-				embedder,
-				getIndexDir(),
-				currentConfig?.extraSessionDirs ?? [],
-				currentConfig?.extraArchiveDirs ?? [],
-				"digest-hybrid",
-			);
-		} else {
-			sessionIndex = new FtsSessionIndex(
-				getIndexDir(),
-				currentConfig?.extraSessionDirs ?? [],
-				currentConfig?.extraArchiveDirs ?? [],
-			);
-		}
+    // Discovery, parsing, persistence, SQLite and embeddings live in the worker.
+    const options = {
+      indexDir: getIndexDir(lastCwd),
+      extraSessionDirs: currentConfig?.extraSessionDirs ?? [],
+      extraArchiveDirs: currentConfig?.extraArchiveDirs ?? [],
+      sessionDir: currentConfig?.sessionDir,
+      archiveDir: currentConfig?.archiveDir,
+      embedder: currentConfig?.embedder,
+      digestHybrid: verdict.kind === "digest-hybrid",
+      fusion: currentConfig?.fusion,
+    };
+    const index = useIndexWorker && existsSync(indexWorkerFile)
+      ? spawnIndexWorker(indexWorkerFile, options, (err) => {
+          if (myGen !== bootGeneration) return;
+          indexState = "failed";
+          indexError = `${err.message.replace(/\.$/, "")}. Run /reload to restart indexing.`;
+          if (syncTimer) clearInterval(syncTimer);
+          syncTimer = null;
+          ui.notify(`session-search: ${indexError}`, "error");
+        })
+      : createIndexService(options);
+    sessionIndex = index;
+    let syncAction = resolveSyncAction(currentConfig?.sync?.interval);
+    let initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelay);
+    if (currentConfig?.sync?.disableForChild && isChildProcess()) {
+      syncAction = { disabled: true };
+      initialAction = { skip: true };
+    }
+    if (syncAction.fallback) ui.notify("session-search: invalid sync.interval; using default", "warning");
+    if (initialAction.fallback) ui.notify("session-search: invalid sync.initialDelay; using default", "warning");
+    const sync = async () => {
+      try {
+        await index.sync({
+          onProgress: (msg) => ui.setStatus("session-search", msg),
+          onError: (msg) => ui.notify(`session-search: ${msg}`, "warning"),
+        });
+        if (myGen !== bootGeneration || indexState === "failed") return;
+        indexState = "ready";
+        ui.setStatus("session-search", "");
+      } catch (err: any) {
+        if (myGen !== bootGeneration || indexState === "failed") return;
+        indexState = "ready";
+        ui.notify(`session-search: sync failed: ${err.message}`, "warning");
+      }
+    };
+    const loaded = index.load({ onError: (msg) => ui.notify(`session-search: ${msg}`, "warning") })
+      .then(() => {
+        if (myGen !== bootGeneration || indexState === "failed") return;
+        indexState = initialAction.skip ? "ready" : "warming";
+        if (!initialAction.skip) {
+          if (initialAction.delayMs) scheduleTimer(() => { void sync(); }, initialAction.delayMs);
+          else void sync();
+        }
+        if (!syncAction.disabled) syncTimer = setInterval(() => { void sync(); }, syncAction.intervalMs ?? SYNC_INTERVAL_MS);
+      }).catch((err: any) => {
+        if (myGen !== bootGeneration || indexState === "failed") return;
+        indexState = "failed";
+        indexError = err.message;
+        ui.notify(`session-search init failed: ${indexError}`, "error");
+      });
+    await Promise.race([loaded, new Promise<void>((r) => setTimeout(r, 1000).unref())]);
 
-		await sessionIndex.load(
-			verdict.kind === "digest-hybrid" // only SessionIndex needs notify for mode transitions
-				? (msg, level) => ui.notify(msg, level as any)
-				: undefined,
-			currentConfig?.embedder,
-		);
-		if (myGen !== bootGeneration) return;
-
-		// Fire-and-forget initial sync with generation guard (task 2.6)
-		const syncGen = bootGeneration;
-		const SYNC_TIMEOUT_MS = 600_000;
-		Promise.race([
-			sessionIndex.sync((msg) => ui.setStatus("session-search", msg)),
-			new Promise<null>((r) => setTimeout(() => r(null), SYNC_TIMEOUT_MS).unref()),
-		])
-			.then((syncResult) => {
-				if (syncGen !== bootGeneration) return; // stale — task 2.6
-				if (syncResult === null) {
-					ui.notify(
-						"session-search: sync timed out (index may be stale)",
-						"warning",
-					);
-					ui.setStatus("session-search", "");
-				} else {
-					const { added, updated, removed, moved } = syncResult;
-					const changes = added + updated + removed + moved;
-					if (changes > 0) {
-						const parts: string[] = [];
-						if (added) parts.push(`+${added}`);
-						if (updated) parts.push(`~${updated}`);
-						if (removed) parts.push(`-${removed}`);
-						if (moved) parts.push(`↗${moved} moved`);
-						ui.setStatus(
-							"session-search",
-							`Sessions: ${parts.join(" ")} (${sessionIndex!.size()} total)`,
-						);
-						if (syncGen === bootGeneration) {
-							setTimeout(() => {
-								if (syncGen !== bootGeneration) return; // stale guard
-								ui.setStatus("session-search", "");
-							}, 5000);
-						}
-					} else {
-						if (syncGen === bootGeneration) {
-							ui.setStatus("session-search", "");
-						}
-					}
-				}
-			})
-			.catch((err: unknown) => {
-				if (syncGen !== bootGeneration) return; // stale
-				const msg = err instanceof Error ? err.message : String(err);
-				ui.notify(`session-search: initial sync failed: ${msg}`, "warning");
-				ui.setStatus("session-search", "");
-			});
-
-		// Periodic sync with generation guard (task 2.10)
-		if (syncTimer) clearInterval(syncTimer);
-		syncTimer = setInterval(async () => {
-			if (!sessionIndex || currentVerdict?.kind === "misconfigured") return; // task 2.10
-
-			const syncGen = bootGeneration;
-			try {
-				const result = await sessionIndex.sync();
-				if (syncGen !== bootGeneration) return; // stale — task 2.6
-				const changes =
-					result.added + result.updated + result.removed + result.moved;
-				if (changes > 0) {
-					const parts: string[] = [];
-					if (result.added) parts.push(`+${result.added}`);
-					if (result.updated) parts.push(`~${result.updated}`);
-					if (result.removed) parts.push(`-${result.removed}`);
-					if (result.moved) parts.push(`↗${result.moved}`);
-					ui.setStatus(
-						"session-search",
-						`Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`,
-					);
-					if (syncGen === bootGeneration) {
-						setTimeout(() => {
-							if (syncGen !== bootGeneration) return; // stale guard
-							ui.setStatus("session-search", "");
-						}, 5000);
-					}
-				}
-			} catch {
-				// Silent
-			}
-		}, SYNC_INTERVAL_MS);
 	});
 
 	// ── Install lifecycle AFTER primary session_start (task 2.5) ────────────
@@ -389,19 +372,19 @@ let currentRollup: CostRollup = emptyRollup();
 	});
 
 	// ── session_shutdown (task 2.11) — calls lifecycleHandle.dispose() ──────
-	pi.on("session_shutdown", async () => {
-		bootGeneration++; // invalidate async work holding this session's ctx
-		lifecycleHandle?.dispose();
-		lifecycleHandle = null;
-
-		if (syncTimer) {
-			clearInterval(syncTimer);
-			syncTimer = null;
-		}
-		if (sessionIndex && "close" in sessionIndex) {
-			(sessionIndex as any).close();
-		}
-	});
+  pi.on("session_shutdown", async () => {
+    bootGeneration++;
+    lifecycleHandle?.dispose();
+    lifecycleHandle = null;
+    if (syncTimer) clearInterval(syncTimer);
+    syncTimer = null;
+    for (const timer of pendingTimers) clearTimeout(timer);
+    pendingTimers.clear();
+    const index = sessionIndex;
+    sessionIndex = null;
+    indexState = "off";
+    await index?.close();
+  });
 
 	// ──────────────────────────────────────────────────────────────────────────
 	// Slash commands — /session:*
@@ -422,6 +405,7 @@ let currentRollup: CostRollup = emptyRollup();
 				const [provider, ...modelParts] = picked.split("/");
 				const model = modelParts.join("/");
 				const config: DigestConfig = {
+          ...loadDigestConfig(lastCwd),
 					provider,
 					model,
 					debounceSeconds: 60,
@@ -430,7 +414,7 @@ let currentRollup: CostRollup = emptyRollup();
 				saveDigestConfig(config);
 				ctx.ui.notify(
 					`Digest config created at ${configPath} with model ${picked}. Run /reload to activate.`,
-					"success",
+					"info",
 				);
 				if (!currentConfig?.embedder) {
 					ctx.ui.notify(
@@ -466,7 +450,7 @@ let currentRollup: CostRollup = emptyRollup();
 				saveDigestConfig(config);
 				ctx.ui.notify(
 					`Digest model updated to ${picked}. Run /reload to activate.`,
-					"success",
+					"info",
 				);
 				if (!currentConfig?.embedder) {
 					ctx.ui.notify(
@@ -503,7 +487,7 @@ let currentRollup: CostRollup = emptyRollup();
 			try {
 				const digest = await lifecycleHandle.triggerNow();
 				if (digest) {
-					ctx.ui.notify(`Digest updated: "${digest.headline}"`, "success");
+					ctx.ui.notify(`Digest updated: "${digest.headline}"`, "info");
 				} else {
 					ctx.ui.notify(
 						"Digest generation failed (LLM returned no valid output).",
@@ -569,7 +553,7 @@ let currentRollup: CostRollup = emptyRollup();
 			try {
 				const digest = await lifecycleHandle.triggerNow({ forceFull: true });
 				if (digest) {
-					ctx.ui.notify(`Digest rewritten: "${digest.headline}"`, "success");
+					ctx.ui.notify(`Digest rewritten: "${digest.headline}"`, "info");
 				} else {
 					ctx.ui.notify("Digest re-summarize failed.", "error");
 				}
@@ -607,6 +591,8 @@ let currentRollup: CostRollup = emptyRollup();
 			const files = discoverSessionFiles(
 				currentConfig?.extraSessionDirs ?? [],
 				currentConfig?.extraArchiveDirs ?? [],
+        currentConfig?.sessionDir,
+        currentConfig?.archiveDir,
 			);
 
 			// Resolve digest model for backfill
@@ -635,7 +621,7 @@ let currentRollup: CostRollup = emptyRollup();
 			}
 
 			// ── 8.5 / 8.7 Full / regen backfill ──────────────────────────────
-			if (!(sessionIndex instanceof SessionIndex)) {
+			if (currentVerdict?.kind !== "digest-hybrid") {
 				ctx.ui.notify(
 					"Backfill requires a vector index (configure embedder via /session:embedder).",
 					"warning",
@@ -658,7 +644,7 @@ let currentRollup: CostRollup = emptyRollup();
 			await runBackfill({
 				files,
 				activeSessionId,
-				index: sessionIndex,
+				index: sessionIndex!,
 				resolvedModel: backfillModel,
 				completeFn,
 				digestConfig,
@@ -764,10 +750,11 @@ let currentRollup: CostRollup = emptyRollup();
 				model,
 				...(apiKey ? { apiKey } : {}),
 				...(apiKeyEnv ? { apiKeyEnv } : {}),
-				...(dimensions !== undefined ? { dimensions } : {}),
+				...(dimensions !== undefined ? { dimensions, sendDimensions: true } : {}),
 			};
 
 			saveConfig({
+        ...loadConfig(lastCwd),
 				embedder,
 				extraSessionDirs: extraDirs
 					? extraDirs
@@ -781,11 +768,11 @@ let currentRollup: CostRollup = emptyRollup();
 							.map((d: string) => d.trim())
 							.filter(Boolean)
 					: undefined,
-			});
+			}, lastCwd);
 
 			ctx.ui.notify(
-				`Embeddings config saved to ${getConfigPath()}. Run /reload to activate.`,
-				"success",
+				`Embeddings config saved to ${getConfigPath(lastCwd)}. Run /reload to activate.`,
+				"info",
 			);
 		},
 	});
@@ -797,16 +784,16 @@ let currentRollup: CostRollup = emptyRollup();
 	pi.registerCommand("session:sync", {
 		description: "Force an immediate incremental re-sync of the session index",
 		handler: async (_args, ctx) => {
-			if (!sessionIndex) {
-				ctx.ui.notify("Session index not ready yet.", "warning");
+			if (!sessionIndex || indexState === "loading" || indexState === "failed") {
+				ctx.ui.notify(unavailable(), "warning");
 				return;
 			}
 			const myGen = bootGeneration;
 			try {
-				const r = await sessionIndex.sync((msg) => {
+				const r = await sessionIndex.sync({ onProgress: (msg) => {
 					if (myGen !== bootGeneration) return; // task 2.6
 					ctx.ui.setStatus("session-search", msg);
-				});
+				} });
 				if (myGen !== bootGeneration) return; // task 2.6
 				const parts: string[] = [];
 				if (r.added) parts.push(`+${r.added}`);
@@ -814,8 +801,8 @@ let currentRollup: CostRollup = emptyRollup();
 				if (r.removed) parts.push(`-${r.removed}`);
 				if (r.moved) parts.push(`↗${r.moved}`);
 				ctx.ui.notify(
-					`Synced: ${parts.join(" ") || "no changes"} (${sessionIndex.size()} total)`,
-					"success",
+					`Synced: ${parts.join(" ") || "no changes"} (${await sessionIndex.size()} total)`,
+					"info",
 				);
 				ctx.ui.setStatus("session-search", "");
 			} catch (err: unknown) {
@@ -829,19 +816,19 @@ let currentRollup: CostRollup = emptyRollup();
 	pi.registerCommand("session:reindex", {
 		description: "Force full re-index of all session files",
 		handler: async (_args, ctx) => {
-			if (!sessionIndex) {
-				ctx.ui.notify("Session index not ready yet.", "warning");
+			if (!sessionIndex || indexState === "loading" || indexState === "failed") {
+				ctx.ui.notify(unavailable(), "warning");
 				return;
 			}
 			const myGen = bootGeneration;
 			ctx.ui.notify("Re-indexing sessions…", "info");
 			try {
-				await sessionIndex.rebuild((msg) => {
+				await sessionIndex.rebuild({ onProgress: (msg) => {
 					if (myGen !== bootGeneration) return; // task 2.6
 					ctx.ui.setStatus("session-search", msg);
-				});
+				} });
 				if (myGen !== bootGeneration) return; // task 2.6
-				ctx.ui.notify(`Re-indexed: ${sessionIndex.size()} sessions`, "success");
+				ctx.ui.notify(`Re-indexed: ${await sessionIndex.size()} sessions`, "info");
 				ctx.ui.setStatus("session-search", "");
 			} catch (err: unknown) {
 				if (myGen !== bootGeneration) return; // task 2.6
@@ -862,9 +849,9 @@ let currentRollup: CostRollup = emptyRollup();
 				if (!sessionIndex) return [];
 				return sessionIndex.search(query, limit);
 			},
-			getDigest(sessionId: string) {
-				if (sessionIndex instanceof SessionIndex) {
-					return sessionIndex.getDigest(sessionId);
+			async getDigest(sessionId: string) {
+				if (currentVerdict?.kind === "digest-hybrid") {
+					return sessionIndex?.getDigest(sessionId) ?? null;
 				}
 				return null;
 			},
@@ -888,6 +875,7 @@ let currentRollup: CostRollup = emptyRollup();
 			"Use session_list for browsing by date/project. Use session_read to dive into a specific session.",
 		],
 		parameters: Type.Object({
+      project: Type.Optional(Type.String({ description: "Filter by project slug or cwd" })),
 			query: Type.String({ description: "Natural language search query" }),
 			limit: Type.Optional(
 				Type.Number({
@@ -895,55 +883,52 @@ let currentRollup: CostRollup = emptyRollup();
 				}),
 			),
 		}),
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
+      try {
 			if (currentVerdict?.kind === "misconfigured") {
 				return {
 					content: [{ type: "text", text: currentVerdict.notifyMessage }],
 					details: {},
 				};
 			}
-			if (!sessionIndex || sessionIndex.size() === 0) {
-				if (!sessionIndex) {
-					return {
-						content: [{ type: "text", text: "Session index not ready yet." }],
-						details: {},
-					};
-				}
+			if (!sessionIndex || indexState === "loading" || indexState === "failed") {
+        return { content: [{ type: "text", text: unavailable() }], details: {} };
+      }
+      if (await sessionIndex.size() === 0) {
 				const msg =
 					currentVerdict?.kind === "digest-hybrid"
 						? "Session index is empty in digest mode. Run /session:backfill to digest historical sessions, or wait for new sessions to be digested live."
 						: "Session index is empty — it may still be building. Try again in a moment.";
-				return { content: [{ type: "text", text: msg }], details: {} };
+				return { content: [{ type: "text", text: msg + warmingNote() }], details: {} };
 			}
 
 			const limit = Math.min(params.limit ?? 10, 25);
 
 			try {
-				const results = await sessionIndex.search(params.query, limit, signal);
+				const results = await sessionIndex.search(params.query, limit, params.project);
 
 				if (results.length === 0) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: `No relevant sessions found for: "${params.query}"`,
+								text: `No relevant sessions found for: "${params.query}"${warmingNote()}`,
 							},
 						],
 						details: {},
 					};
 				}
 
-				const home = process.env.HOME || "";
-				const output = results
-					.map((r, i) => {
+				const home = homedir();
+				const output = (await Promise.all(results
+					.map(async (r, i) => {
 						const score = (r.score * 100).toFixed(1);
 						const displayFile = r.session.file.replace(home, "~");
 
 						if (
-							currentVerdict?.kind === "digest-hybrid" &&
-							sessionIndex instanceof SessionIndex
+							currentVerdict?.kind === "digest-hybrid"
 						) {
-							const digest = sessionIndex.getDigest(r.session.id);
+							const digest = await sessionIndex!.getDigest(r.session.id);
 							if (digest) {
 								const topicsLine =
 									digest.topics.length > 0
@@ -968,19 +953,23 @@ let currentRollup: CostRollup = emptyRollup();
 							`Date: ${r.session.startedAt.split("T")[0]} | CWD: ${r.session.cwd}`,
 							r.summary,
 						].join("\n");
-					})
+					})))
 					.join("\n\n---\n\n");
 
-				const header = `Found ${results.length} sessions for "${params.query}" (${sessionIndex.size()} sessions indexed):\n\n`;
+				const header = `Found ${results.length} sessions for "${params.query}" (${await sessionIndex.size()} sessions indexed):\n\n`;
 
 				return {
-					content: [{ type: "text", text: header + output }],
-					details: { resultCount: results.length, indexSize: sessionIndex.size() },
+					content: [{ type: "text", text: header + output + warmingNote() }],
+					details: { resultCount: results.length, indexSize: await sessionIndex.size() },
 				};
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				throw new Error(`session-search failed: ${msg}`);
 			}
+      } catch (err) {
+        if (indexState === "failed") return { content: [{ type: "text", text: unavailable() }], details: {} };
+        throw err;
+      }
 		},
 	});
 
@@ -1012,22 +1001,26 @@ let currentRollup: CostRollup = emptyRollup();
 				Type.Number({ description: "Max results (default 20, max 50)" }),
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
+      try {
 			if (currentVerdict?.kind === "misconfigured") {
 				return {
 					content: [{ type: "text", text: currentVerdict.notifyMessage }],
 					details: {},
 				};
 			}
-			if (!sessionIndex || sessionIndex.size() === 0) {
+			if (!sessionIndex || indexState === "loading" || indexState === "failed") {
+        return { content: [{ type: "text", text: unavailable() }], details: {} };
+      }
+      if (await sessionIndex.size() === 0) {
 				const msg = !sessionIndex
-					? "Session index not ready yet."
+					? unavailable()
 					: "Session index is empty.";
-				return { content: [{ type: "text", text: msg }], details: {} };
+				return { content: [{ type: "text", text: msg + warmingNote() }], details: {} };
 			}
 
 			const limit = Math.min(params.limit ?? 20, 50);
-			const sessions = sessionIndex.list({
+			const sessions = await sessionIndex.list({
 				project: params.project,
 				after: params.after,
 				before: params.before,
@@ -1037,17 +1030,17 @@ let currentRollup: CostRollup = emptyRollup();
 
 			if (sessions.length === 0) {
 				return {
-					content: [{ type: "text", text: "No sessions match the filters." }],
+					content: [{ type: "text", text: `No sessions match the filters.${warmingNote()}` }],
 					details: {},
 				};
 			}
 
-			const home = process.env.HOME || "";
-			const output = sessions
-				.map((s, i) => {
+			const home = homedir();
+			const output = (await Promise.all(sessions
+				.map(async (s, i) => {
 					let name: string;
-					if (currentVerdict?.kind === "digest-hybrid" && sessionIndex instanceof SessionIndex) {
-						const digest = sessionIndex.getDigest(s.id);
+					if (currentVerdict?.kind === "digest-hybrid") {
+						const digest = await sessionIndex!.getDigest(s.id);
 						if (digest) {
 							name = digest.headline;
 						} else {
@@ -1066,15 +1059,19 @@ let currentRollup: CostRollup = emptyRollup();
 					const arch = s.archived ? " (archived)" : "";
 					const displayFile = s.file.replace(home, "~");
 					return `${i + 1}. **${name}** — ${date}${arch}\n   CWD: ${s.cwd} | ${s.userMessageCount} msgs | Tools: ${tools}\n   File: ${displayFile}`;
-				})
+				})))
 				.join("\n\n");
 
-			const header = `${sessions.length} sessions (${sessionIndex.size()} total indexed):\n\n`;
+			const header = `${sessions.length} sessions (${await sessionIndex.size()} total indexed):\n\n`;
 
 			return {
-				content: [{ type: "text", text: header + output }],
+				content: [{ type: "text", text: header + output + warmingNote() }],
 				details: { resultCount: sessions.length },
 			};
+      } catch (err) {
+        if (indexState === "failed") return { content: [{ type: "text", text: unavailable() }], details: {} };
+        throw err;
+      }
 		},
 	});
 
@@ -1107,7 +1104,8 @@ let currentRollup: CostRollup = emptyRollup();
 				}),
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
+      try {
 			if (currentVerdict?.kind === "misconfigured") {
 				return {
 					content: [{ type: "text", text: currentVerdict.notifyMessage }],
@@ -1122,7 +1120,7 @@ let currentRollup: CostRollup = emptyRollup();
 				!filePath.endsWith(".jsonl") &&
 				!filePath.includes("/")
 			) {
-				const entry = sessionIndex.get(filePath);
+				const entry = await sessionIndex.get(filePath);
 				if (entry) {
 					filePath = entry.session.file;
 				} else {
@@ -1130,7 +1128,7 @@ let currentRollup: CostRollup = emptyRollup();
 						content: [
 							{
 								type: "text",
-								text: `Session not found: "${params.session}". Use session_search or session_list to find the session file path.`,
+								text: `Session not found: "${params.session}". Use session_search or session_list to find the session file path.${warmingNote()}`,
 							},
 						],
 						details: {},
@@ -1142,7 +1140,7 @@ let currentRollup: CostRollup = emptyRollup();
 				filePath = filePath.replace("~", process.env.HOME || "");
 			}
 
-			const home = process.env.HOME || "";
+			const home = homedir();
 			const allowedRoots = [
 				resolve(home, ".pi", "agent", "sessions"),
 				resolve(home, ".pi", "agent", "sessions-archive"),
@@ -1178,6 +1176,10 @@ let currentRollup: CostRollup = emptyRollup();
 				content: [{ type: "text", text: output }],
 				details: { file: filePath },
 			};
+      } catch (err) {
+        if (indexState === "failed") return { content: [{ type: "text", text: unavailable() }], details: {} };
+        throw err;
+      }
 		},
 	});
 }

@@ -22,8 +22,8 @@
  * (4.7): prior digest untouched, no setSessionName.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Model, Api } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Model, Api } from "@earendil-works/pi-ai";
 
 import type { SessionDigest } from "./schema";
 import type { DigestConfig } from "./config";

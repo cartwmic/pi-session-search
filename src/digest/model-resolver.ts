@@ -1,4 +1,4 @@
-import type { Model, Api } from "@mariozechner/pi-ai";
+import type { Model, Api } from "@earendil-works/pi-ai";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

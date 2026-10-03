@@ -23,8 +23,10 @@ export interface EmbedderConfig {
   apiKey?: string;
   /** Name of env var to read for the key. Fallback if apiKey is absent. */
   apiKeyEnv?: string;
-  /** Optional dimensions, passed through to the API when set. */
+  /** Optional expected dimensions; sent only when sendDimensions is true. */
   dimensions?: number;
+  /** Send dimensions only when supported by the endpoint. */
+  sendDimensions?: boolean;
   /** Optional extra headers merged into every request. */
   headers?: Record<string, string>;
 }
@@ -79,7 +81,8 @@ export function createEmbedder(
     config.model,
     config.baseUrl,
     config.dimensions,
-    config.headers
+    config.headers,
+    config.sendDimensions ?? false
   );
 }
 
@@ -99,7 +102,8 @@ class OpenAICompatibleEmbedder implements Embedder {
     private model: string,
     baseUrl: string,
     private dimensions?: number,
-    private extraHeaders?: Record<string, string>
+    private extraHeaders?: Record<string, string>,
+    private sendDimensions = false
   ) {
     this.endpoint = `${baseUrl.replace(/\/$/, "")}/v1/embeddings`;
   }
@@ -126,7 +130,7 @@ class OpenAICompatibleEmbedder implements Embedder {
         model: this.model,
       };
       // Only include dimensions when explicitly configured
-      if (this.dimensions !== undefined) {
+      if (this.dimensions !== undefined && this.sendDimensions) {
         body.dimensions = this.dimensions;
       }
 

@@ -7,8 +7,8 @@
  * to digest/lifecycle.ts (Phase 4).
  */
 
-import type { Model, Api, AssistantMessage, ToolCall } from "@mariozechner/pi-ai";
-import { Value } from "@sinclair/typebox/value";
+import type { Model, Api, AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
+import { Value } from "typebox/value";
 import { submitDigestTool, validateDigest, DigestArgs } from "./schema";
 import type { SessionDigest } from "./schema";
 import type { ConversationView } from "./conversation-view";

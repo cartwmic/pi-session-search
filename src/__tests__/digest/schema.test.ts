@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { validateDigest, submitDigestTool, DigestArgs } from "../../digest/schema";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "typebox/value";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

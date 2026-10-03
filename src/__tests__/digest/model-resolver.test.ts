@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { resolveModel } from "../../digest/model-resolver";
-import type { Model, Api } from "@mariozechner/pi-ai";
+import type { Model, Api } from "@earendil-works/pi-ai";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -16,11 +16,11 @@ import { createEmbedder, type EmbedderConfig } from "../embedder";
 
 describe("toFtsQuery", () => {
   it("wraps simple terms in quotes", () => {
-    assert.equal(toFtsQuery("hello world"), '"hello" "world"');
+    assert.equal(toFtsQuery("hello world"), '"hello" OR "world"');
   });
 
   it("strips special FTS characters", () => {
-    assert.equal(toFtsQuery('hello "world" {foo}'), '"hello" "world" "foo"');
+    assert.equal(toFtsQuery('hello "world" {foo}'), '"hello" OR "world" OR "foo"');
   });
 
   it("returns empty string for empty input", () => {
@@ -36,7 +36,7 @@ describe("toFtsQuery", () => {
   });
 
   it("strips brackets, parens, colons, carets, asterisks", () => {
-    assert.equal(toFtsQuery("foo:bar [baz] (qux) ^hey *wild"), '"foo" "bar" "baz" "qux" "hey" "wild"');
+    assert.equal(toFtsQuery("foo:bar [baz] (qux) ^hey *wild"), '"foo" OR "bar" OR "baz" OR "qux" OR "hey" OR "wild"');
   });
 });
 
@@ -451,7 +451,7 @@ describe("createEmbedder", () => {
 
   // ── dimensions passthrough ───────────────────────────────────────
 
-  it("includes dimensions in request body when configured", async () => {
+  it("includes dimensions in request body when explicitly enabled", async () => {
     let capturedBody: Record<string, unknown> = {};
     const savedFetch = globalThis.fetch;
     (globalThis as any).fetch = async (_url: string, opts: RequestInit) => {
@@ -468,6 +468,7 @@ describe("createEmbedder", () => {
         model: "test-model",
         apiKey: "sk-test",
         dimensions: 512,
+        sendDimensions: true,
       });
       assert.ok(embedder !== null);
       await embedder!.embed("hello");

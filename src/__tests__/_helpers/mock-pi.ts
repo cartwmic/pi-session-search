@@ -13,7 +13,7 @@
  *   await pi.invokeCommand("find-session", "", ctx)
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 // ─── Internal types ────────────────────────────────────────────────
 

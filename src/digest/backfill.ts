@@ -6,7 +6,7 @@
  */
 
 import { statSync } from "node:fs";
-import type { Model, Api } from "@mariozechner/pi-ai";
+import type { Model, Api } from "@earendil-works/pi-ai";
 import { discoverSessionFiles, parseSession, readSessionId } from "../parser";
 import type { SessionDigest } from "./schema";
 import { loadDigest, saveDigest } from "./storage";
@@ -25,7 +25,12 @@ export interface BackfillRunDeps {
 	/** Active session ID — always skipped (owned by live lifecycle). */
 	activeSessionId: string;
 	/** The vector index to update. */
-	index: SessionIndex;
+	index: {
+    addDigested: SessionIndex["addDigested"];
+    flush(): void | Promise<void>;
+    setBackfillInProgress?(value: boolean): Promise<void>;
+    backfillInProgress?: boolean;
+  };
 	/** Resolved digest LLM model. */
 	resolvedModel: Model<Api>;
 	/** Completion dispatch bound to Pi's effective host provider. */
@@ -82,7 +87,8 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 	}
 
 	setStatus(`Backfilling digests: 0/${total}`);
-	index.backfillInProgress = true;
+	if (index.setBackfillInProgress) await index.setBackfillInProgress(true);
+  else index.backfillInProgress = true;
 
 	let done = 0;
 	let failed = 0;
@@ -127,7 +133,7 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 				flushCount++;
 
 				if (flushCount >= 25) {
-					index.flush();
+					await index.flush();
 					flushCount = 0;
 				}
 
@@ -144,8 +150,9 @@ export async function runBackfill(deps: BackfillRunDeps): Promise<void> {
 			"success",
 		);
 	} finally {
-		index.flush();
-		index.backfillInProgress = false;
+		await index.flush();
+		if (index.setBackfillInProgress) await index.setBackfillInProgress(false);
+    else index.backfillInProgress = false;
 		setStatus(undefined);
 	}
 }
@@ -172,7 +179,7 @@ export interface BackfillDryRunDeps {
  *   embedCostUsd        = sessionCount × 700 × pricePerInputToken             (if configured)
  *
  * Note: pi-ai's `Model<Api>.cost.{input,output}` is denominated in USD per 1M
- * tokens (see `@mariozechner/pi-ai/dist/models.js` `applyCost`). The /1_000_000
+ * tokens (see `@earendil-works/pi-ai/dist/models.js` `applyCost`). The /1_000_000
  * divisor here matches that convention. `embedder.pricePerInputToken` keeps
  * its literal name — USD per single token — for backward compatibility.
  */

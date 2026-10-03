@@ -2,7 +2,8 @@
  * Flat searchable model picker for digest configuration.
  * Emulates pi's built-in /model command UX.
  */
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	Input,
 	SelectList,
@@ -10,9 +11,8 @@ import {
 	type Component,
 	type Focusable,
 	type SelectItem,
-	type Theme,
 	type TUI,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 /** SelectList with standard fuzzy filtering on label + description. */
 class FuzzySelectList extends SelectList {

@@ -40,7 +40,12 @@ Or add to `~/.pi/agent/settings.json`:
 }
 ```
 
-Requires **Node 22.5+** (`node:sqlite` is used for FTS5). Node 24+ is recommended.
+Requires **Node 22.19+** with SQLite FTS5. Verified with **Pi 1.0.0** and Node 24.
+
+For this fork, install the Git package (`git:github.com/cartwmic/pi-session-search`).
+Pi loads `src/index.ts`; indexing uses the checked-in `dist/index-worker.js`.
+After changing source locally, run `npm ci && npm run build` and restart Pi (or `/reload`).
+The worker must be rebuilt too; rebuilding only the source does not update a running worker.
 
 ## Setup
 
@@ -64,6 +69,8 @@ Config is written to `~/.pi/session-search/config.json`:
   }
 }
 ```
+
+Set `sendDimensions: true` alongside `dimensions` only for endpoints that support dimension reduction. The setup wizard enables it when you explicitly supply dimensions. Missing embedding response indexes (e.g. Gemini) use array position.
 
 Any provider that exposes a standard `/v1/embeddings` endpoint works — Together, Fireworks, vLLM, LiteLLM, Anyscale, etc. Set `baseUrl` accordingly.
 
@@ -240,9 +247,24 @@ The upstream embedder shipped four provider-specific code paths. This fork colla
 
 `INDEX_VERSION` moved from 3 to 4. Existing v3 index entries are discarded on load. Run `/session:backfill` post-upgrade to rebuild.
 
-### No merge compatibility
+### Upstream reconciliation (2.1.0)
 
-This fork is no longer merge-compatible with `samfoy/pi-session-search`. Future upstream syncs are selective cherry-picks only. See [CHANGELOG.md](./CHANGELOG.md) for rollback instructions.
+Upstream 1.6.0 is now merged, with real merge ancestry for future syncs. Digest-driven indexing, host-registry model dispatch, caller-driven cancellation, the `/session:*` command namespace, and the flat embedder config remain fork behavior.
+
+Discovery, JSONL parsing, JSON persistence, SQLite and embedding work run on a worker thread. Worker crashes produce one error and a `/reload` hint; configuration/init errors keep their own advice. If the compiled worker is missing, indexing falls back to the calling thread.
+
+Optional config fields carried from upstream:
+
+- `sessionDir` / `archiveDir`: override source directories. Otherwise `PI_SESSION_DIR` / `PI_SESSION_ARCHIVE_DIR` apply.
+- `sync.interval`: milliseconds between syncs; `-1` disables the timer.
+- `sync.initialDelay`: milliseconds before startup sync; `-1` skips it.
+- `sync.disableForChild`: disable automatic sync in child/non-interactive processes.
+- `primer.enabled: false`: disable the fork's Recent Sessions system-prompt primer.
+- `fusion: "vector-primary"`: preserve vector ranking and fill spare results with up to five keyword-only hits. Default: `"rrf"`.
+
+The fork keeps its digest-aware system-prompt primer rather than upstream's one-time custom message. Project-local `pi-session-search.localPath` / `pi-total-recall.localPath` settings relocate config and index; `PI_SESSION_SEARCH_HOME` still isolates global digest state.
+
+Validation: `npm ci && npm test && npm run check && npm run build`. Tests run serially to keep worker responsiveness and scaling measurements from contending with other test files. `python3 tests/blackbox/run.py` drives isolated Pi with a scripted model and local embedding backend; it never uses real sessions or paid providers.
 
 ## License
 

@@ -8,7 +8,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { setKittyProtocolActive } from "@mariozechner/pi-tui";
+import { setKittyProtocolActive } from "@earendil-works/pi-tui";
 import { FindSessionOverlayComponent } from "../../search/overlay.js";
 import type { SearchableIndex } from "../../search/overlay.js";
 import type { SearchResult } from "../../index/session-index.js";

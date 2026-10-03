@@ -160,15 +160,20 @@ class FtsSide {
     )
   }
   /** Returns id→rank map (rank starts at 1, best first). */
-  searchRanks(q: string, limit: number): Map<string, number> {
+  searchRanks(q: string, limit: number, allowedIds?: Set<string>): Map<string, number> {
     const fts = toFtsQuery(q)
     const out = new Map<string, number>()
     if (!fts) return out
     return dbCall("search", { db: this.dbPath, comp: "FtsSide", limit }, () => {
       const rows = this.db
         .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s, ?, ?) LIMIT ?")
-        .all(fts, W_DIGEST, W_RAW, limit) as any[]
-      rows.forEach((r, i) => out.set(String(r.id), i + 1))
+        .all(fts, W_DIGEST, W_RAW, allowedIds ? -1 : limit) as any[]
+      for (const row of rows) {
+        const id = String(row.id);
+        if (allowedIds && !allowedIds.has(id)) continue;
+        out.set(id, out.size + 1);
+        if (out.size >= limit) break;
+      }
       return out
     })
   }
@@ -373,7 +378,7 @@ export function decodeEmbedding(stored: number[] | string): number[] {
  * These are only needed during embedding generation, not at search/list time.
  * Saves ~17MB across 2000 sessions.
  */
-function stripHeavyFields(session: ParsedSession): ParsedSession {
+export function stripHeavyFields(session: ParsedSession): ParsedSession {
   return {
     ...session,
     userMessages: [],
@@ -417,6 +422,9 @@ export class SessionIndex {
     private extraSessionDirs: string[] = [],
     private extraArchiveDirs: string[] = [],
     mode?: Mode,
+    private sessionDir?: string,
+    private archiveDir?: string,
+    private fusion: "rrf" | "vector-primary" = "rrf",
   ) {
     this.mode = mode ?? "fts-raw";
     mkdirSync(indexDir, { recursive: true });
@@ -678,7 +686,8 @@ export class SessionIndex {
    * are listable but not searchable (embedding + FTS content left empty).
    */
   async sync(
-    onProgress?: (msg: string) => void
+    onProgress?: (msg: string) => void,
+    onError?: (msg: string) => void,
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
     // Task 6.6: while backfill is in progress, skip periodic sync
     if (this.backfillInProgress) {
@@ -693,6 +702,8 @@ export class SessionIndex {
     const discovered = discoverSessionFiles(
       this.extraSessionDirs,
       this.extraArchiveDirs,
+      this.sessionDir,
+      this.archiveDir,
     );
 
     let added = 0;
@@ -995,9 +1006,12 @@ export class SessionIndex {
   async search(
     query: string,
     limit: number = 10,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    project?: string,
   ): Promise<SearchResult[]> {
-    const allEntries = Object.entries(this.data.sessions);
+    const slug = project?.toLowerCase();
+    const allEntries = Object.entries(this.data.sessions).filter(([, entry]) =>
+      !slug || entry.session.projectSlug.toLowerCase().includes(slug) || entry.session.cwd.toLowerCase().includes(slug));
     if (allEntries.length === 0) return [];
 
     // Task 6.11: in digest-hybrid, cosine scoring runs ONLY over entries that
@@ -1037,7 +1051,7 @@ export class SessionIndex {
       });
     }
 
-    const ftsRanks = this.fts.searchRanks(query, poolSize);
+    const ftsRanks = this.fts.searchRanks(query, poolSize, project ? new Set(allEntries.map(([id]) => id)) : undefined);
 
     // Neither semantic nor keyword side produced a candidate — nothing matches.
     if (cosineRanks.size === 0 && ftsRanks.size === 0) return [];
@@ -1048,7 +1062,16 @@ export class SessionIndex {
     for (const [id, r] of cosineRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
     for (const [id, r] of ftsRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
 
-    const sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    let sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    if (this.fusion === "vector-primary") {
+      const ids = [...cosineRanks.keys()].slice(0, limit);
+      let appended = 0;
+      for (const id of ftsRanks.keys()) {
+        if (appended >= 5) break;
+        if (!ids.includes(id)) { ids.push(id); appended++; }
+      }
+      sorted = ids.slice(0, limit).map((id, rank) => [id, 1 / (60 + rank + 1)]);
+    }
 
     return sorted
       .map(([id, score]) => {

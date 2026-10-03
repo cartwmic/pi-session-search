@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { emptyRollup, record, format } from "../../digest/cost-tracker";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

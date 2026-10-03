@@ -65,7 +65,7 @@ function buildLogger(): { logger: pino.Logger; path: string | null } {
 	const LEVEL = process.env.PI_SESSION_SEARCH_DEBUG_LEVEL || "debug";
 	const SYNC_FILE = process.env.PI_SESSION_SEARCH_LOG_SYNC_FILE;
 
-	let destinationStream: NodeJS.WritableStream | undefined;
+	let destinationStream: pino.DestinationStream | undefined;
 	let resolvedPath: string | null = null;
 
 	if (SYNC_FILE) {

@@ -14,10 +14,10 @@
  *   src/index.ts as part of Phase 10 wiring.
  */
 
-import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { SearchResult } from "../index/session-index.js";
 import type { Verdict } from "../index/mode.js";
 import type { SessionDigest } from "../digest/schema.js";
@@ -31,7 +31,7 @@ import { formatRelativeDate } from "../utils.js";
  */
 export interface SearchableIndex {
   search(query: string, limit: number): Promise<SearchResult[]>;
-  getDigest(sessionId: string): SessionDigest | null;
+  getDigest(sessionId: string): SessionDigest | null | Promise<SessionDigest | null>;
 }
 
 // ─── Rendering helpers ────────────────────────────────────────────────────────
@@ -254,7 +254,7 @@ export class FindSessionOverlayComponent implements Component, Focusable {
       }
       for (let i = start; i < end; i++) {
         const result = this.results[i];
-        const digest = this.index.getDigest(result.session.id);
+        const digest = this.digests.get(result.session.id) ?? null;
         const selected = i === this.selectedIndex;
         const cardLines = renderCard(result, digest, selected, innerWidth, this.theme);
         content.push(...cardLines);
@@ -361,6 +361,8 @@ export class FindSessionOverlayComponent implements Component, Focusable {
     this.searchTimeout = setTimeout(() => this.runSearch(), this.debounceMs);
   }
 
+  private digests = new Map<string, SessionDigest | null>();
+
   private async runSearch(): Promise<void> {
     this.searchTimeout = null;
     const q = this.query.trim();
@@ -375,6 +377,8 @@ export class FindSessionOverlayComponent implements Component, Focusable {
     this.requestRender();
     try {
       this.results = await this.index.search(q, 25);
+      this.digests = new Map(await Promise.all(this.results.map(async (result) =>
+        [result.session.id, await this.index.getDigest(result.session.id)] as const)));
       this.selectedIndex = 0;
       this.resetScroll();
     } catch {

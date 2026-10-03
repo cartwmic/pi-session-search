@@ -1,7 +1,8 @@
 {
   "name": "pi-session-search",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Index, summarize, and search past pi sessions. Covers both active and archived sessions, enabling semantic search and introspection over your coding history.",
+  "type": "module",
   "keywords": [
     "pi-package",
     "extension",
@@ -10,17 +11,28 @@
     "semantic-search",
     "embeddings"
   ],
-  "files": [
-    "src",
-    "skills",
-    "README.md",
-    "LICENSE"
-  ],
   "license": "MIT",
+  "author": "Sam Painter",
   "repository": {
     "type": "git",
-    "url": "https://github.com/samfoy/pi-session-search"
+    "url": "git+https://github.com/samfoy/pi-session-search.git"
   },
+  "homepage": "https://github.com/samfoy/pi-session-search#readme",
+  "bugs": {
+    "url": "https://github.com/samfoy/pi-session-search/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "src",
+    "!src/__tests__",
+    "dist",
+    "skills",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./src/index.ts"
@@ -30,24 +42,32 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "^0.58.4",
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "^0.58.4",
-    "@sinclair/typebox": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*"
   },
-
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.0.0",
+    "@types/node": "^25.5.0",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.0",
+    "typebox": "^1.3.34",
+    "typescript": "^6.0.3",
+    "@earendil-works/pi-ai": "^1.0.0",
+    "@earendil-works/pi-tui": "^1.0.0"
+  },
+  "scripts": {
+    "pretest": "npm run build",
+    "test": "npm run test:lint-modes && /usr/bin/find src -name \"*.test.ts\" | sort | xargs node --test --test-concurrency=1 --test-force-exit --import tsx",
+    "build": "esbuild src/index.ts src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external",
+    "check": "tsc --noEmit",
+    "dev": "esbuild src/index.ts src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external --watch",
+    "prepack": "npm run build",
+    "test:lint-modes": "! grep -rn '\"digest-mode\"\\|\"hybrid-raw\"' src/ --include='*.ts' | grep -v 'src/__tests__/\\|src/index/session-index.ts\\|LegacyDiskMode\\|src/index/mode.ts'"
+  },
   "dependencies": {
     "pino": "^10.3.1",
     "rotating-file-stream": "^3.2.9"
-  },
-
-  "devDependencies": {
-    "@types/node": "^25.5.0",
-    "tsx": "^4.19.0",
-    "typescript": "^6.0.3"
-  },
-  "scripts": {
-    "test": "npm run test:lint-modes && find src -name '*.test.ts' | sort | xargs node --test --test-force-exit --import tsx",
-    "test:lint-modes": "! grep -rn '\"digest-mode\"\\|\"hybrid-raw\"' src/ --include='*.ts' | grep -v 'src/__tests__/\\|src/index/session-index.ts\\|LegacyDiskMode\\|src/index/mode.ts'"
   }
 }

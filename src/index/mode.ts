@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 
-import type { Model, Api } from "@mariozechner/pi-ai"
+import type { Model, Api } from "@earendil-works/pi-ai"
 import type { Config } from "../config"
 import type { DigestConfig } from "../digest/config"
 import { resolveModel } from "../digest/model-resolver"

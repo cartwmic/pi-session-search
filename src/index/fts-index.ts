@@ -4,8 +4,13 @@ import { join } from "node:path";
 import type { ParsedSession } from "../parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "../parser";
 import type { SearchResult, ListFilters } from "./session-index";
-import { truncate, buildSummary } from "../utils";
+import { buildSummary, createYielder } from "../utils";
 import { log, dbCall } from "../log";
+import { assertFts5Available } from "../fts5-probe";
+
+const BUSY_TIMEOUT_MS = 5000;
+/** PRAGMA user_version once load() has removed duplicates older releases left. */
+const HEALED_USER_VERSION = 1;
 
 /**
  * SQLite FTS5-backed session index. API-compatible with SessionIndex.
@@ -17,24 +22,34 @@ export class FtsSessionIndex {
   private indexDir: string;
   private extraSessionDirs: string[];
   private extraArchiveDirs: string[];
+  private sessionDir?: string;
+  private archiveDir?: string;
 
   constructor(
     indexDir: string,
     extraSessionDirs: string[] = [],
     extraArchiveDirs: string[] = [],
+    sessionDir?: string,
+    archiveDir?: string,
   ) {
     this.indexDir = indexDir;
     this.extraSessionDirs = extraSessionDirs;
     this.extraArchiveDirs = extraArchiveDirs;
+    this.sessionDir = sessionDir;
+    this.archiveDir = archiveDir;
     mkdirSync(indexDir, { recursive: true });
     this.dbPath = join(indexDir, "sessions-fts.db");
   }
 
   async load(): Promise<void> {
-    this.db = dbCall("open", { db: this.dbPath, comp: "FtsSessionIndex" }, () => new DatabaseSync(this.dbPath));
-    dbCall("pragma busy_timeout", { db: this.dbPath, comp: "FtsSessionIndex" }, () =>
-      this.db.exec("PRAGMA busy_timeout = 5000;"),
-    );
+    // Fail fast with an actionable message on Node runtimes without FTS5
+    // (older Node 22 releases omit it). Without this probe the
+    // CREATE VIRTUAL TABLE below leaves the DB file with no tables and
+    // later queries surface "no such table: sessions".
+    assertFts5Available();
+
+    this.db = dbCall("open", { comp: "FtsSessionIndex", db: this.dbPath }, () => new DatabaseSync(this.dbPath));
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
 
     // Migrate: add sizeBytes column if missing (FTS5 UNINDEXED columns)
     // FTS5 virtual tables don't support ALTER TABLE ADD COLUMN, so we check
@@ -47,14 +62,10 @@ export class FtsSessionIndex {
       // Column doesn't exist — need to recreate the table
     }
     if (!hasSizeBytes) {
-      log.info({ comp: "FtsSessionIndex", db: this.dbPath }, "schema migration: dropping legacy sessions table (no sizeBytes column)");
-      dbCall("drop-legacy-sessions", { db: this.dbPath, comp: "FtsSessionIndex" }, () =>
-        this.db.exec("DROP TABLE IF EXISTS sessions"),
-      );
+      this.db.exec("DROP TABLE IF EXISTS sessions");
     }
 
-    dbCall("create-table", { db: this.dbPath, comp: "FtsSessionIndex", table: "sessions" }, () =>
-      this.db.exec(`
+    this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS sessions USING fts5(
         id UNINDEXED,
         file UNINDEXED,
@@ -70,8 +81,33 @@ export class FtsSessionIndex {
         content,
         tokenize='porter unicode61'
       );
-    `),
-    );
+    `);
+
+    this.dropOldDuplicatesOnce();
+  }
+
+  /**
+   * FTS5 has no unique constraint, and releases before 1.6.0 could index one
+   * id twice when two pi processes synced at once. Scan for that once per DB;
+   * sync() handles later races. Best-effort: while another connection holds
+   * the write lock it is skipped, and the next open or adding sync heals.
+   */
+  private dropOldDuplicatesOnce(): void {
+    const { user_version } = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    if (user_version >= HEALED_USER_VERSION) return;
+    try {
+      this.db.exec("PRAGMA busy_timeout = 0");
+      try {
+        this.db.exec("BEGIN IMMEDIATE");
+      } finally {
+        this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      }
+      dropDuplicateRows(this.db);
+      this.db.exec(`PRAGMA user_version = ${HEALED_USER_VERSION}`);
+      this.db.exec("COMMIT");
+    } catch {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+    }
   }
 
   save(): void { /* auto-persisted */ }
@@ -83,14 +119,30 @@ export class FtsSessionIndex {
 
   async sync(
     onProgress?: (msg: string) => void,
+    _onError?: (msg: string) => void,
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
-    const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs);
+    try {
+      return await this.applyChanges(onProgress);
+    } catch (err) {
+      // Roll back the failed chunk: left open, it would make every later
+      // sync's BEGIN fail. Chunks committed before it stay indexed.
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  private async applyChanges(
+    onProgress?: (msg: string) => void,
+  ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
+    const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
 
     let added = 0, updated = 0, removed = 0, moved = 0;
+    const pause = createYielder();
 
     // Build idToFile map from disk (preferring newer mtime on dupes)
     const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number; sizeBytes: number }>();
     for (const { file, archived } of discovered) {
+      if (pause.due()) await pause.yield();
       let mtimeMs: number;
       let sizeBytes: number;
       try {
@@ -122,21 +174,14 @@ export class FtsSessionIndex {
 
     // Remove sessions no longer present
     const delStmt = this.db.prepare("DELETE FROM sessions WHERE id = ?");
-    dbCall("sync:remove-tx", { db: this.dbPath, comp: "FtsSessionIndex", candidateCount: currentIds.size }, () => {
-      this.db.exec("BEGIN");
-      try {
-        for (const id of currentIds) {
-          if (!idToFile.has(id)) {
-            delStmt.run(id);
-            removed++;
-          }
-        }
-        this.db.exec("COMMIT");
-      } catch (e) {
-        try { this.db.exec("ROLLBACK"); } catch { /* COMMIT may have already failed */ }
-        throw e;
+    this.db.exec("BEGIN");
+    for (const id of currentIds) {
+      if (!idToFile.has(id)) {
+        delStmt.run(id);
+        removed++;
       }
-    });
+    }
+    this.db.exec("COMMIT");
 
     // Figure out what needs (re-)ingestion
     const toIngest: { id: string; file: string; archived: boolean; mtimeMs: number; sizeBytes: number }[] = [];
@@ -171,67 +216,69 @@ export class FtsSessionIndex {
     `);
     const replaceDel = this.db.prepare("DELETE FROM sessions WHERE id = ?");
 
-    dbCall("sync:ingest-tx", { db: this.dbPath, comp: "FtsSessionIndex", ingestCount: toIngest.length }, () => {
-      this.db.exec("BEGIN");
-      try {
-        let done = 0;
-        for (const item of toIngest) {
-          const session = parseSession(item.file, item.archived);
-          if (!session || session.userMessageCount === 0) { done++; continue; }
-          const content = buildContent(session);
-          const summary = buildSummary(session);
-          const isUpdate = currentIds.has(item.id);
-          if (isUpdate) replaceDel.run(item.id);
-          insertStmt.run(
-            session.id,
-            session.file,
-            session.archived ? 1 : 0,
-            session.startedAt,
-            session.projectSlug,
-            session.cwd,
-            item.mtimeMs,
-            item.sizeBytes,
-            JSON.stringify(session),
-            summary,
-            session.name ?? "",
-            content,
-          );
-          if (isUpdate) updated++; else added++;
-          done++;
-          if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
-        }
+    // Commit before each yield so no transaction spans an await: requests
+    // served between chunks never meet an open transaction, and other pi
+    // processes sharing this DB only wait for one chunk's write lock.
+    this.db.exec("BEGIN");
+    let done = 0;
+    for (const item of toIngest) {
+      if (pause.due()) {
         this.db.exec("COMMIT");
-      } catch (e) {
-        try { this.db.exec("ROLLBACK"); } catch { /* COMMIT may have already failed */ }
-        throw e;
+        await pause.yield();
+        this.db.exec("BEGIN");
       }
-    });
+      const session = parseSession(item.file, item.archived);
+      if (!session || session.userMessageCount === 0) { done++; continue; }
+      const content = buildContent(session);
+      const summary = buildSummary(session);
+      const isUpdate = currentIds.has(item.id);
+      // A DELETE by the UNINDEXED id scans the whole table, so only updates
+      // pay it; ids another process inserted meanwhile are deduped below.
+      if (isUpdate) replaceDel.run(item.id);
+      insertStmt.run(
+        session.id,
+        session.file,
+        session.archived ? 1 : 0,
+        session.startedAt,
+        session.projectSlug,
+        session.cwd,
+        item.mtimeMs,
+        item.sizeBytes,
+        JSON.stringify(session),
+        summary,
+        session.name ?? "",
+        content,
+      );
+      if (isUpdate) updated++; else added++;
+      done++;
+      if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
+    }
+    // Another pi process sharing this DB may have inserted some of the ids
+    // added here since currentRows was read. One scan per sync removes them.
+    if (added > 0) dropDuplicateRows(this.db);
+    this.db.exec("COMMIT");
 
-    log.info(
-      { comp: "FtsSessionIndex", db: this.dbPath, added, updated, removed, moved },
-      "sync complete",
-    );
+    log.info({ comp: "FtsSessionIndex", db: this.dbPath, added, updated, removed, moved }, "sync complete");
     return { added, updated, removed, moved };
   }
 
-  async rebuild(onProgress?: (msg: string) => void): Promise<void> {
+  async rebuild(onProgress?: (msg: string) => void, onError?: (msg: string) => void): Promise<void> {
     this.db.exec("DELETE FROM sessions");
-    await this.sync(onProgress);
+    await this.sync(onProgress, onError);
   }
 
-  async search(query: string, limit = 10, _signal?: AbortSignal): Promise<SearchResult[]> {
+  async search(query: string, limit = 10, _signal?: AbortSignal, project?: string): Promise<SearchResult[]> {
     const fts = toFtsQuery(query);
     if (!fts) return [];
-    const rows = dbCall(
-      "search",
-      { db: this.dbPath, comp: "FtsSessionIndex", queryLen: query.length, limit },
-      () =>
-        this.db
-          .prepare(
-            "SELECT json, summary, bm25(sessions) AS score FROM sessions WHERE sessions MATCH ? ORDER BY score LIMIT ?",
-          )
-          .all(fts, limit),
-    ) as any[];
+    const clauses: string[] = ["sessions MATCH ?"];
+    const args: any[] = [fts];
+    if (project) {
+      clauses.push("(lower(projectSlug) LIKE ? OR lower(cwd) LIKE ?)");
+      const p = `%${project.toLowerCase()}%`;
+      args.push(p, p);
+    }
+    const sql = `SELECT json, summary, bm25(sessions) AS score FROM sessions WHERE ${clauses.join(" AND ")} ORDER BY score LIMIT ?`;
+    const rows = dbCall("query", { comp: "FtsSessionIndex", db: this.dbPath, limit }, () => this.db.prepare(sql).all(...args, limit)) as any[];
     return rows.map((r) => {
       const session = JSON.parse(String(r.json)) as ParsedSession;
       // Normalize BM25 (lower is better) into a 0..1-ish relevance score for display
@@ -258,7 +305,7 @@ export class FtsSessionIndex {
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const limit = filters?.limit ?? 1000;
     const sql = `SELECT json FROM sessions ${where} ORDER BY startedAt DESC LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...args, limit) as any[];
+    const rows = dbCall("query", { comp: "FtsSessionIndex", db: this.dbPath, limit }, () => this.db.prepare(sql).all(...args, limit)) as any[];
     return rows.map((r) => JSON.parse(String(r.json)) as ParsedSession);
   }
 
@@ -282,17 +329,25 @@ export class FtsSessionIndex {
   }
 
   close(): void {
-    dbCall("close", { db: this.dbPath, comp: "FtsSessionIndex" }, () => this.db.close());
+    dbCall("close", { comp: "FtsSessionIndex", db: this.dbPath }, () => this.db.close());
   }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/**
- * Build FTS content for a session.
- * Returns a concatenation of name, user messages, compaction summaries,
- * branch summaries, and filesModified — suitable for BM25 keyword search.
- */
+/** Delete all but each id's newest row (by mtime, then rowid). One table scan. */
+function dropDuplicateRows(db: DatabaseSync): void {
+  db.exec(`
+    DELETE FROM sessions WHERE rowid IN (
+      SELECT rowid FROM (
+        SELECT rowid, row_number() OVER (
+          PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
+        ) AS rank FROM sessions
+      ) WHERE rank > 1
+    )
+  `);
+}
+
 export function buildContent(s: ParsedSession): string {
   const parts: string[] = [];
   if (s.name) parts.push(s.name);
@@ -305,9 +360,12 @@ export function buildContent(s: ParsedSession): string {
 
 /**
  * Turn a user query into a safe FTS5 MATCH expression.
- * Strips FTS syntax characters, quotes each term, and joins with implicit AND.
- * AND is more precise than OR — BM25 ranks multi-term matches highest, and
- * sessions missing a term are excluded rather than diluting the result set.
+ * Strips FTS syntax characters, quotes each term, and joins with OR.
+ *
+ * OR rather than AND: BM25 already ranks docs matching more terms higher, so
+ * OR preserves recall (partial matches stay in the result set) without
+ * sacrificing relevance. In hybrid mode FTS is fused with vector search via
+ * RRF — we want FTS to surface candidates, not hard-exclude them.
  */
 export function toFtsQuery(q: string): string {
   const terms = q
@@ -316,5 +374,5 @@ export function toFtsQuery(q: string): string {
     .map((t) => t.trim())
     .filter((t) => t.length > 0)
     .map((t) => `"${t}"`);
-  return terms.join(" "); // implicit AND in FTS5
+  return terms.join(" OR ");
 }

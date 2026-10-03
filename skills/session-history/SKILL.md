@@ -19,7 +19,7 @@ In **digest-hybrid** mode (enabled by explicit embedder and digest-model configu
 ```
 session_search(query="refactoring the auth module")
 session_search(query="Lambda timeout debugging", limit=5)
-session_search(query="setting up CI pipeline for Nessie")
+session_search(query="setting up CI pipeline for myapp")
 ```
 
 ### session_list
@@ -28,7 +28,7 @@ Browse sessions with filters. Good for time-based queries or project-specific br
 In digest-hybrid mode, listed sessions show `digest.headline` when available; un-digested sessions fall back to a truncated first user message with a `(no digest — run /session:update)` suffix.
 
 ```
-session_list(project="Rosie")                    # Sessions in the Rosie project
+session_list(project="myapp")                    # Sessions in the myapp project
 session_list(after="2026-03-01", limit=10)       # Recent sessions
 session_list(archived=true, limit=20)            # Archived sessions only
 session_list(project="pi-slack-bot", after="2026-03-10")
@@ -38,7 +38,7 @@ session_list(project="pi-slack-bot", after="2026-03-10")
 Read the full conversation from a specific session. Use the file path or UUID from search/list results.
 
 ```
-session_read(session="~/.pi/agent/sessions/--workplace-samfp-Rosie--/2026-03-10T21-36-44.jsonl")
+session_read(session="~/.pi/agent/sessions/--home-user-projects-myapp--/2026-03-10T21-36-44.jsonl")
 session_read(session="124c2fe2-820c-4d63-8899-eb8d48007d39")
 session_read(session="...", offset=50, limit=50)           # Pagination for long sessions
 session_read(session="...", include_tools=true)             # Include tool call results

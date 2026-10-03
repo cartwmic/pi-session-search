@@ -22,7 +22,7 @@ import type { DigestConfig } from "../../digest/config";
 import type { BuilderState } from "../../digest/builder";
 import type { ConversationView } from "../../digest/conversation-view";
 import type { BuilderStateOnDisk } from "../../digest/storage";
-import type { Model, Api } from "@mariozechner/pi-ai";
+import type { Model, Api } from "@earendil-works/pi-ai";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

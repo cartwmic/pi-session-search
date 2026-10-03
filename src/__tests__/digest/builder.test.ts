@@ -10,7 +10,7 @@ import {
 } from "../../digest/builder";
 import type { BuilderState } from "../../digest/builder";
 import type { ConversationView } from "../../digest/conversation-view";
-import type { Model, Api, AssistantMessage } from "@mariozechner/pi-ai";
+import type { Model, Api, AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionDigest } from "../../digest/schema";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

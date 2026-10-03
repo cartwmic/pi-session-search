@@ -46,7 +46,8 @@ export interface ConversationView {
 export interface LiveSource {
 	getBranch(): Array<{
 		type: string;
-		[key: string]: unknown;
+		summary?: unknown;
+    message?: unknown;
 	}>;
 }
 
