@@ -60,9 +60,10 @@
   "scripts": {
     "pretest": "npm run build",
     "test": "npm run test:lint-modes && /usr/bin/find src -name \"*.test.ts\" | sort | xargs node --test --test-concurrency=1 --test-force-exit --import tsx",
-    "build": "esbuild src/index.ts src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external && npm run -s build:worker",
+    "build:worker": "esbuild src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --external:pino --external:rotating-file-stream",
     "check": "tsc --noEmit",
-    "dev": "esbuild src/index.ts src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external --watch",
+    "dev": "esbuild src/index.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external --watch",
     "prepack": "npm run build",
     "test:lint-modes": "! grep -rn '\"digest-mode\"\\|\"hybrid-raw\"' src/ --include='*.ts' | grep -v 'src/__tests__/\\|src/index/session-index.ts\\|LegacyDiskMode\\|src/index/mode.ts'"
   },
