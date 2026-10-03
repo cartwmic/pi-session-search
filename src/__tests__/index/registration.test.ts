@@ -114,7 +114,11 @@ describe("registration (Phase B) — module-load invariants", () => {
       2,
       "session_shutdown: 1 from extension + 1 from lifecycle = 2",
     )
-    assert.equal(basCount, 1, "before_agent_start must be registered once")
+    assert.equal(
+      basCount,
+      2,
+      "before_agent_start: 1 from extension + 1 from lifecycle (initial title) = 2",
+    )
     assert.equal(aeCount, 1, "agent_end must be registered once (from lifecycle)")
     assert.equal(scCount, 1, "session_compact must be registered once (from lifecycle)")
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.0 (2026-10-03)
+
+- Name a new session from its first prompt as soon as it is submitted, using the
+  configured digest model. The first digest headline replaces it. Sessions that
+  already have a name or digest are not retitled.
+
 ## 2.1.0 (2026-10-03)
 
 - Merge upstream 1.6.0: worker-thread indexing, FTS dedupe/rollback, crash reporting,

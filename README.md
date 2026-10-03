@@ -169,6 +169,8 @@ The digest builder runs after each agent turn (debounced 60 s) and on session co
 4. Calls `pi.setSessionName(headline)` so the digest headline appears in the status bar and `pi -r`
 5. Re-embeds `digest.body` and re-indexes it in FTS5
 
+On the first prompt of a new, unnamed session, the same configured digest model also writes a short title from that prompt and calls `pi.setSessionName(title)` right away. The first digest headline replaces it. Sessions that already have a name or a digest are left alone.
+
 Digests are stored **independently of the index DB** — index rebuilds (e.g. on schema migration) re-read digests from disk without re-calling the LLM.
 
 #### Why digests improve recall

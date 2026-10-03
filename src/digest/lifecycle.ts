@@ -3,6 +3,7 @@
  *
  * Installs four event handlers on ExtensionAPI:
  *   session_start    → reload config + restore in-memory state from disk
+ *   before_agent_start → first prompt only: name the session from the prompt
  *   agent_end        → debounced digest trigger
  *   session_compact  → immediate digest trigger (bypass debounce)
  *   session_shutdown → abort in-flight call + cleanup
@@ -27,7 +28,8 @@ import type { Model, Api } from "@earendil-works/pi-ai";
 
 import type { SessionDigest } from "./schema";
 import type { DigestConfig } from "./config";
-import type { BuilderState, CompleteFn } from "./builder";
+import type { BuilderState } from "./builder";
+import type { CompleteFn } from "./completion";
 import { emptyBuilderState } from "./builder";
 import { resolveHostCompleteFn } from "./completion";
 import type { HostModelRegistry } from "./completion";
@@ -57,6 +59,16 @@ export interface LifecycleBuilder {
 			completeFn?: CompleteFn;
 		},
 	) => Promise<{ digest: SessionDigest; anchor: number } | null>;
+	/**
+	 * Optional. Title the session from its first prompt. Returns null on
+	 * failure. When absent, the session is named only by the first digest.
+	 */
+	generateTitle?: (
+		model: Model<Api>,
+		prompt: string,
+		completeFn: CompleteFn,
+		opts?: { signal?: AbortSignal },
+	) => Promise<string | null>;
 }
 
 export interface LifecycleCostTracker {
@@ -190,6 +202,12 @@ export function installDigestLifecycle(
 	 */
 	let currentCtx: ExtensionContext | null = null;
 
+	/** Whether the initial-title attempt already ran for this session. */
+	let titleAttempted = false;
+
+	/** AbortController for the in-flight initial-title call. */
+	let titleAbort: AbortController | null = null;
+
 	/** Current merged config (refreshed on session_start). */
 	let config: DigestConfig = deps.configLoader();
 
@@ -200,6 +218,51 @@ export function installDigestLifecycle(
 			clearTimeout(debounceTimer);
 			debounceTimer = null;
 		}
+	}
+
+	function abortTitle(): void {
+		if (titleAbort) {
+			titleAbort.abort();
+			titleAbort = null;
+		}
+	}
+
+	/**
+	 * Name a brand-new session from its first prompt. Skips sessions that
+	 * already have a digest or a name. Never overwrites a name set meanwhile,
+	 * and never overwrites a digest headline that lands first.
+	 */
+	async function fireInitialTitle(prompt: string, ctx: ExtensionContext): Promise<void> {
+		const generateTitle = deps.builder.generateTitle;
+		if (!generateTitle || titleAttempted) return;
+		titleAttempted = true;
+		if (disposed || !currentModel || !sessionId) return;
+		if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
+		if (state.lastDigest || pi.getSessionName?.()) return;
+
+		const id = sessionId;
+		const model = currentModel;
+		const ac = new AbortController();
+		titleAbort = ac;
+
+		let title: string | null = null;
+		try {
+			const completeFn = await resolveHostCompleteFn(
+				ctx.modelRegistry as unknown as HostModelRegistry,
+				model,
+			);
+			title = await generateTitle(model, prompt, completeFn, { signal: ac.signal });
+		} catch (err: unknown) {
+			const emsg = err instanceof Error ? err.message : String(err);
+			log.warn({ comp: "digest", provider: model.provider, model: model.id, err: emsg }, "initial title failed");
+		} finally {
+			if (titleAbort === ac) titleAbort = null;
+		}
+
+		if (!title || ac.signal.aborted || disposed || sessionId !== id) return;
+		if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
+		if (state.lastDigest || pi.getSessionName?.()) return;
+		pi.setSessionName(title);
 	}
 
 	function clearFollowUpTimer(): void {
@@ -397,6 +460,8 @@ export function installDigestLifecycle(
 
 		state = emptyBuilderState();
 		state.lastDigest = savedDigest;
+		abortTitle();
+		titleAttempted = false;
 
 		if (savedBuilderState) {
 			state.convTokensAtLastWrite = savedBuilderState.convTokensAtLastWrite;
@@ -411,6 +476,11 @@ export function installDigestLifecycle(
 			!deps.isCurrentGeneration || deps.isCurrentGeneration()
 				? deps.modelResolver(config, ctx.modelRegistry.getAvailable())
 				: undefined;
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		if (disposed) return;
+		void fireInitialTitle(event.prompt, ctx);
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
@@ -433,6 +503,7 @@ export function installDigestLifecycle(
 			currentAbort.abort();
 			currentAbort = null;
 		}
+		abortTitle();
 
 		// Clear scheduling timers.
 		clearDebounceTimer();
@@ -456,6 +527,7 @@ export function installDigestLifecycle(
 			currentAbort = null;
 		}
 
+		abortTitle();
 		clearDebounceTimer();
 		clearFollowUpTimer();
 

@@ -34,6 +34,7 @@ import {
 	emptyBuilderState,
 } from "./digest/builder";
 import { resolveHostCompleteFn } from "./digest/completion";
+import { generateTitle } from "./digest/title";
 import type { CompleteFn, HostModelRegistry } from "./digest/completion";
 import {
 	liveConversationView,
@@ -360,7 +361,7 @@ let currentRollup: CostRollup = emptyRollup();
 
 	lifecycleHandle = installDigestLifecycle(pi, {
 		storage: { loadDigest, saveDigest, loadBuilderState, saveBuilderState },
-		builder: { generateDigest },
+		builder: { generateDigest, generateTitle },
 		costTracker: lifecycleCostTracker,
 		configLoader: () => loadDigestConfig(lastCwd),
 		modelResolver: resolveModel,

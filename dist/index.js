@@ -2526,6 +2526,57 @@ async function resolveHostCompleteFn(registry, model) {
   return (requestModel, context, options) => registry.stream(requestModel, context, options).result();
 }
 
+// src/digest/title.ts
+var MAX_TITLE_CHARS = 80;
+var MAX_PROMPT_CHARS = 4e3;
+var SYSTEM_PROMPT = "You name coding-agent sessions. Reply with only a short title (at most 80 characters) that summarizes the user's request. No quotes, no trailing punctuation, no preamble.";
+function cleanTitle(raw) {
+  const line = raw.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+  if (!line) return null;
+  const unquote = (s) => s.replace(/^["'`*]+|["'`*]+$/g, "").trim();
+  let title = unquote(unquote(line).replace(/^(session )?title\s*:\s*/i, "")).replace(/[.\s]+$/, "").trim();
+  if (title.length === 0) return null;
+  if (title.length > MAX_TITLE_CHARS) title = `${title.slice(0, MAX_TITLE_CHARS - 1).trimEnd()}\u2026`;
+  return title;
+}
+async function generateTitle(model, prompt, completeFn, opts = {}) {
+  const text = prompt.trim();
+  if (text.length === 0) return null;
+  const clipped = text.length > MAX_PROMPT_CHARS ? `${text.slice(0, MAX_PROMPT_CHARS)}\u2026` : text;
+  let response;
+  try {
+    response = await completeFn(
+      model,
+      {
+        systemPrompt: SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: `Title this request:
+
+${clipped}` }],
+            timestamp: Date.now()
+          }
+        ]
+      },
+      { signal: opts.signal }
+    );
+  } catch (err) {
+    const emsg = err instanceof Error ? err.message : String(err);
+    log.warn({ comp: "digest", provider: model.provider, model: model.id, err: emsg }, "initial title: completion threw");
+    return null;
+  }
+  if (response.stopReason === "error") {
+    log.warn(
+      { comp: "digest", provider: model.provider, model: model.id, errorMessage: response.errorMessage },
+      "initial title: completion returned an error response"
+    );
+    return null;
+  }
+  const raw = response.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+  return cleanTitle(raw);
+}
+
 // src/digest/conversation-view.ts
 function extractText(content) {
   if (typeof content === "string") return content;
@@ -2584,12 +2635,49 @@ function installDigestLifecycle(pi, deps) {
   let currentAbort = null;
   let followUpTimer = null;
   let currentCtx = null;
+  let titleAttempted = false;
+  let titleAbort = null;
   let config = deps.configLoader();
   function clearDebounceTimer() {
     if (debounceTimer !== null) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
+  }
+  function abortTitle() {
+    if (titleAbort) {
+      titleAbort.abort();
+      titleAbort = null;
+    }
+  }
+  async function fireInitialTitle(prompt, ctx) {
+    const generateTitle2 = deps.builder.generateTitle;
+    if (!generateTitle2 || titleAttempted) return;
+    titleAttempted = true;
+    if (disposed || !currentModel || !sessionId) return;
+    if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
+    if (state.lastDigest || pi.getSessionName?.()) return;
+    const id = sessionId;
+    const model = currentModel;
+    const ac = new AbortController();
+    titleAbort = ac;
+    let title = null;
+    try {
+      const completeFn = await resolveHostCompleteFn(
+        ctx.modelRegistry,
+        model
+      );
+      title = await generateTitle2(model, prompt, completeFn, { signal: ac.signal });
+    } catch (err) {
+      const emsg = err instanceof Error ? err.message : String(err);
+      log.warn({ comp: "digest", provider: model.provider, model: model.id, err: emsg }, "initial title failed");
+    } finally {
+      if (titleAbort === ac) titleAbort = null;
+    }
+    if (!title || ac.signal.aborted || disposed || sessionId !== id) return;
+    if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
+    if (state.lastDigest || pi.getSessionName?.()) return;
+    pi.setSessionName(title);
   }
   function clearFollowUpTimer() {
     if (followUpTimer !== null) {
@@ -2721,12 +2809,18 @@ function installDigestLifecycle(pi, deps) {
     const savedBuilderState = deps.storage.loadBuilderState(sessionId);
     state = emptyBuilderState();
     state.lastDigest = savedDigest;
+    abortTitle();
+    titleAttempted = false;
     if (savedBuilderState) {
       state.convTokensAtLastWrite = savedBuilderState.convTokensAtLastWrite;
       state.lastWrittenMessageIndex = savedBuilderState.lastWrittenMessageIndex;
       state.lastWrittenSummaryIndex = savedBuilderState.lastWrittenSummaryIndex;
     }
     currentModel = !deps.isCurrentGeneration || deps.isCurrentGeneration() ? deps.modelResolver(config, ctx.modelRegistry.getAvailable()) : void 0;
+  });
+  pi.on("before_agent_start", (event, ctx) => {
+    if (disposed) return;
+    void fireInitialTitle(event.prompt, ctx);
   });
   pi.on("agent_end", (_event, ctx) => {
     if (disposed) return;
@@ -2744,6 +2838,7 @@ function installDigestLifecycle(pi, deps) {
       currentAbort.abort();
       currentAbort = null;
     }
+    abortTitle();
     clearDebounceTimer();
     clearFollowUpTimer();
     state.dirty = false;
@@ -2754,6 +2849,7 @@ function installDigestLifecycle(pi, deps) {
       currentAbort.abort();
       currentAbort = null;
     }
+    abortTitle();
     clearDebounceTimer();
     clearFollowUpTimer();
     currentModel = void 0;
@@ -3610,7 +3706,7 @@ ${lines.join("\n")}
   });
   lifecycleHandle = installDigestLifecycle(pi, {
     storage: { loadDigest, saveDigest, loadBuilderState, saveBuilderState },
-    builder: { generateDigest },
+    builder: { generateDigest, generateTitle },
     costTracker: lifecycleCostTracker,
     configLoader: () => loadDigestConfig(lastCwd),
     modelResolver: resolveModel,
