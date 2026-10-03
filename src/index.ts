@@ -178,9 +178,10 @@ let currentRollup: CostRollup = emptyRollup();
 
 	// ── Session primer (task 2.9) — no longer uses currentMode ────────────────
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (currentConfig?.primer?.enabled === false || !sessionIndex || await sessionIndex.size() === 0) return;
+		if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
 
 		try {
+			if (await sessionIndex.size() === 0) return;
 			const cwd = ctx.cwd || "";
 			const projectSlug = cwd ? pathToSlug(cwd) : undefined;
 

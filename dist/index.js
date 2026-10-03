@@ -277,8 +277,9 @@ var OpenAICompatibleEmbedder = class {
         );
       }
       const json = await res.json();
-      for (const item of json.data) {
-        results[i + item.index] = item.embedding;
+      for (let k = 0; k < json.data.length; k++) {
+        const item = json.data[k];
+        results[i + (item.index ?? k)] = item.embedding;
       }
     }
     return results;
@@ -3455,8 +3456,9 @@ function index_default(pi) {
     void sessionIndex.addDigest(sessionId, digest).catch((err) => log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed"));
   }
   pi.on("before_agent_start", async (event, ctx) => {
-    if (currentConfig?.primer?.enabled === false || !sessionIndex || await sessionIndex.size() === 0) return;
+    if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
     try {
+      if (await sessionIndex.size() === 0) return;
       const cwd = ctx.cwd || "";
       const projectSlug = cwd ? pathToSlug(cwd) : void 0;
       let sessions = await sessionIndex.list({ project: projectSlug, limit: 5 });

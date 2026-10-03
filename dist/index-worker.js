@@ -153,8 +153,9 @@ var OpenAICompatibleEmbedder = class {
         );
       }
       const json = await res.json();
-      for (const item of json.data) {
-        results[i + item.index] = item.embedding;
+      for (let k = 0; k < json.data.length; k++) {
+        const item = json.data[k];
+        results[i + (item.index ?? k)] = item.embedding;
       }
     }
     return results;

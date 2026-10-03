@@ -66,6 +66,28 @@ describe("index worker crash", () => {
     }
   });
 
+  it("skips the primer on every turn after worker death without repeating the crash report", { timeout: 10_000 }, async () => {
+    const host = createFakeHost(ROOT, extension);
+    const workerFile = join(ROOT, "crashing-worker.mjs");
+    writeFileSync(workerFile, CRASHING_WORKER);
+    _setIndexWorkerEnabled(true, workerFile);
+    try {
+      await host.start();
+      assert.match(await untilUnavailable(host), /index worker exited with code 3/);
+      for (let turn = 0; turn < 3; turn++) {
+        assert.equal(await host.primer(), undefined, `turn ${turn + 1} skips the primer`);
+      }
+      assert.deepEqual(
+        host.notes.filter((n) => /exited|fail/i.test(n)),
+        ["session-search: index worker exited with code 3. Run /reload to restart indexing."],
+      );
+    } finally {
+      _setIndexWorkerEnabled(true);
+      await host.shutdown();
+      host.cleanup();
+    }
+  });
+
   it("an init failure is not told to /reload, which cannot fix it", { timeout: 10_000 }, async () => {
     const host = createFakeHost(ROOT, extension);
     const workerFile = join(ROOT, "init-failing-worker.mjs");

@@ -21,6 +21,43 @@ function installEmbeddingFetch(assertBody: (body: Record<string, unknown>) => vo
   }) as typeof fetch;
 }
 
+describe("createEmbedder OpenAI-compatible response indices", () => {
+  it("embeds a single response item without an index", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      data: [{ embedding: [0.1, 0.2, 0.3] }],
+    }), { status: 200 })) as typeof fetch;
+
+    const embedder = createEmbedder({
+      apiKey: "test-key",
+      baseUrl: "https://example.test",
+      model: "gemini-embedding-001",
+    });
+
+    assert.deepEqual(await embedder.embed("hello"), [0.1, 0.2, 0.3]);
+  });
+
+  it("uses response positions for omitted indices across multiple batches", async () => {
+    const batchSizes: number[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      batchSizes.push(input.length);
+      return new Response(JSON.stringify({
+        data: input.map((text) => ({ embedding: [Number(text)] })),
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const embedder = createEmbedder({
+      apiKey: "test-key",
+      baseUrl: "https://example.test",
+      model: "gemini-embedding-001",
+    });
+    const texts = Array.from({ length: 102 }, (_, i) => String(i));
+
+    assert.deepEqual(await embedder.embedBatch(texts), texts.map((text) => [Number(text)]));
+    assert.deepEqual(batchSizes, [100, 2]);
+  });
+});
+
 describe("createEmbedder OpenAI-compatible dimensions", () => {
   it("does not send dimensions for openai-compatible providers by default", async () => {
     installEmbeddingFetch((body) => {
