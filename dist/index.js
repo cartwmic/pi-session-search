@@ -2346,17 +2346,50 @@ function serializeView(view) {
   ];
   return parts.join("\n\n");
 }
-function capInput(view, model, includesPrevDigest) {
+var FIRST_MESSAGE_MAX_CHARS = 4e3;
+var SUMMARY_FLOOR_CHARS = 12e3;
+function clipMiddle(text, max) {
+  if (text.length <= max) return text;
+  const marker = (n) => `
+[... ${n} characters omitted ...]
+`;
+  const room = Math.max(0, max - marker(text.length).length);
+  const head = Math.ceil(room * 2 / 3), tail = room - head;
+  return text.slice(0, head) + marker(text.length - head - tail) + (tail > 0 ? text.slice(text.length - tail) : "");
+}
+function capInput(view, model, includesPrevDigest, scale = 1) {
   const envelope = includesPrevDigest ? 4e3 : 2e3;
   const contextChars = (model.contextWindow ?? 25e3) * 4;
   const maxTokChars = (model.maxTokens ?? 4096) * 4;
-  const cap = Math.min(1e5, contextChars - maxTokChars - envelope);
+  const factor = Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
+  const cap = Math.floor(Math.min(1e5, contextChars - maxTokChars - envelope) * factor);
   const serialized = serializeView(view);
   if (serialized.length <= cap) return view;
-  const summaryText = view.compactionSummaries.join("\n\n");
+  const summaryBudget = Math.max(SUMMARY_FLOOR_CHARS, Math.floor(cap * 0.6));
+  const keptSummaries = [];
+  let summaryUsed = 0, omitted = 0;
+  for (let i = view.compactionSummaries.length - 1; i >= 0; i--) {
+    const text = view.compactionSummaries[i];
+    const cost = text.length + 2;
+    if (keptSummaries.length === 0 && cost > summaryBudget) {
+      const clipped = clipMiddle(text, summaryBudget - 2);
+      keptSummaries.unshift(clipped);
+      summaryUsed += clipped.length + 2;
+      continue;
+    }
+    if (summaryUsed + cost > summaryBudget) {
+      omitted++;
+      continue;
+    }
+    keptSummaries.unshift(text);
+    summaryUsed += cost;
+  }
+  const summaries = omitted > 0 ? [`[${omitted} earlier compaction summaries omitted]`, ...keptSummaries] : keptSummaries;
+  if (omitted > 0) summaryUsed += summaries[0].length + 2;
   const firstMsg = view.messages[0] ?? null;
-  const firstMsgText = firstMsg ? `${firstMsg.role}: ${firstMsg.text}` : "";
-  const overhead = summaryText.length + firstMsgText.length + 100;
+  const firstText = firstMsg ? clipMiddle(firstMsg.text, FIRST_MESSAGE_MAX_CHARS) : "";
+  const firstMsgText = firstMsg ? `${firstMsg.role}: ${firstText}` : "";
+  const overhead = summaryUsed + firstMsgText.length + 100;
   let remaining = Math.max(0, cap - overhead);
   const tail = [];
   for (let i = view.messages.length - 1; i >= 1; i--) {
@@ -2369,9 +2402,9 @@ function capInput(view, model, includesPrevDigest) {
     tail.unshift(msg);
   }
   const messages = [];
-  if (firstMsg) messages.push(firstMsg);
+  if (firstMsg) messages.push(firstText === firstMsg.text ? firstMsg : { ...firstMsg, text: firstText });
   messages.push(...tail);
-  return { messages, compactionSummaries: view.compactionSummaries };
+  return { messages, compactionSummaries: summaries };
 }
 function serializeForPrompt(view) {
   const parts = [];
@@ -2394,7 +2427,7 @@ var SYSTEM_PROMPT_BASE = `You are a session digest writer. ${SCHEMA_INSTRUCTIONS
 var SYSTEM_PROMPT_STRICT = `${SYSTEM_PROMPT_BASE}
 
 IMPORTANT: Your previous response failed validation. Common mistakes: wrong field names, headline >80 chars, body <50 chars, topics not an array, markdown code fences around the JSON. Output the raw JSON object directly.`;
-function buildPrompt(state, view, threshold, model) {
+function buildPrompt(state, view, threshold, model, budgetScale = 1) {
   const convTokens = estimateTokens(serializeView(view));
   const tokensSinceLastWrite = convTokens - state.convTokensAtLastWrite;
   const hasLastDigest = state.lastDigest != null;
@@ -2406,7 +2439,8 @@ function buildPrompt(state, view, threshold, model) {
       delta,
       model,
       /* includesPrevDigest */
-      true
+      true,
+      budgetScale
     );
     const deltaText = serializeForPrompt(capped);
     userMessage = `Previous headline: ${JSON.stringify(state.lastDigest.headline)}
@@ -2422,7 +2456,8 @@ Keep the previous headline verbatim unless the session's overall topic has funda
       view,
       model,
       /* includesPrevDigest */
-      false
+      false,
+      budgetScale
     );
     const convText = serializeForPrompt(capped);
     userMessage = `Here is the full conversation to digest:
@@ -2433,13 +2468,26 @@ Call submit_digest now.`;
   }
   return { mode, systemPrompt: SYSTEM_PROMPT_BASE, userMessage };
 }
+var CONTEXT_OVERFLOW = /exceeds? the context window|context[ _-]?(window|length)[^.]{0,40}(exceed|too|limit)|maximum context|prompt is too long|input is too long|too many (input )?tokens|reduce the length of the (messages|prompt)|context_length_exceeded/i;
+var NOT_OVERFLOW = /rate[ _-]?limit|throttl|quota|overloaded/i;
+function isContextWindowError(message) {
+  return !!message && !NOT_OVERFLOW.test(message) && CONTEXT_OVERFLOW.test(message);
+}
+var MIN_BUDGET_SCALE = 0.05;
 async function generateDigest(model, view, state, opts = {}) {
   const threshold = opts.resummarizeTokenThreshold ?? 1e4;
   const completeFn = opts.completeFn ?? opts._completeFn;
   if (!completeFn) {
     throw new Error("generateDigest requires a host-bound completeFn");
   }
-  const { systemPrompt, userMessage } = buildPrompt(state, view, threshold, model);
+  const baseScale = Number.isFinite(opts.budgetScale) && opts.budgetScale > 0 ? Math.min(1, opts.budgetScale) : 1;
+  const diag = opts.diagnostics;
+  if (diag) {
+    diag.contextWindowExceeded = false;
+    diag.scaleUsed = baseScale;
+  }
+  let contextRejected = false;
+  const { systemPrompt, userMessage } = buildPrompt(state, view, threshold, model, baseScale);
   const makeCtx = (sysPrompt, msg) => ({
     systemPrompt: sysPrompt,
     messages: [
@@ -2466,10 +2514,12 @@ async function generateDigest(model, view, state, opts = {}) {
     } catch (err) {
       const msg2 = err instanceof Error ? err.message : String(err);
       log.warn({ comp: "digest", provider: model.provider, model: model.id, err: msg2 }, "digest complete() threw");
+      contextRejected = isContextWindowError(msg2);
       return null;
     }
     if (response.stopReason === "error") {
       const errorMessage = response.errorMessage ?? "unknown error";
+      contextRejected = isContextWindowError(errorMessage);
       log.warn(
         { comp: "digest", provider: model.provider, model: model.id, errorMessage },
         "digest completion returned an error response"
@@ -2507,14 +2557,26 @@ async function generateDigest(model, view, state, opts = {}) {
     };
     return { digest, response };
   };
+  contextRejected = false;
   const first = await attemptCall(systemPrompt, userMessage);
   if (first) {
     return { digest: first.digest, anchor: view.messages.length };
+  }
+  if (contextRejected) {
+    const scale = Math.max(MIN_BUDGET_SCALE, baseScale / 2);
+    if (diag) diag.scaleUsed = scale;
+    const smaller = buildPrompt(state, view, threshold, model, scale);
+    contextRejected = false;
+    const retry = await attemptCall(smaller.systemPrompt, smaller.userMessage);
+    if (retry) return { digest: retry.digest, anchor: view.messages.length };
+    if (diag) diag.contextWindowExceeded = contextRejected;
+    return null;
   }
   const second = await attemptCall(SYSTEM_PROMPT_STRICT, userMessage);
   if (second) {
     return { digest: second.digest, anchor: view.messages.length };
   }
+  if (diag) diag.contextWindowExceeded = contextRejected;
   return null;
 }
 
@@ -2625,12 +2687,19 @@ function parsedConversationView(parsed) {
 }
 
 // src/digest/lifecycle.ts
+var CONTEXT_BACKOFF_BASE_MS = 10 * 6e4;
+var CONTEXT_BACKOFF_MAX_MS = 6 * 60 * 6e4;
+var contextBackoffMs = (failures) => Math.min(CONTEXT_BACKOFF_MAX_MS, CONTEXT_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1));
 function installDigestLifecycle(pi, deps) {
   let disposed = false;
   let sessionId = null;
   let currentModel = void 0;
   let state = emptyBuilderState();
   let lastError = null;
+  const now = deps.now ?? Date.now;
+  let budgetScale = 1;
+  let contextFailures = 0;
+  let backoffUntil = 0;
   let debounceTimer = null;
   let currentAbort = null;
   let followUpTimer = null;
@@ -2689,6 +2758,7 @@ function installDigestLifecycle(pi, deps) {
     if (disposed) return;
     if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
     if (!currentModel || !sessionId || !currentCtx) return;
+    if (now() < backoffUntil) return;
     if (state.pendingCall) {
       state.dirty = true;
       return;
@@ -2702,6 +2772,7 @@ function installDigestLifecycle(pi, deps) {
     const model = currentModel;
     const view = liveConversationView(ctx.sessionManager);
     let result = null;
+    const diagnostics = {};
     try {
       const completeFn = await resolveHostCompleteFn(
         ctx.modelRegistry,
@@ -2710,7 +2781,9 @@ function installDigestLifecycle(pi, deps) {
       result = await deps.builder.generateDigest(model, view, state, {
         signal: ac.signal,
         resummarizeTokenThreshold: config.resummarizeTokenThreshold,
-        completeFn
+        completeFn,
+        budgetScale,
+        diagnostics
       });
     } catch (err) {
       const emsg = err instanceof Error ? err.message : String(err);
@@ -2756,10 +2829,24 @@ function installDigestLifecycle(pi, deps) {
         lastWrittenMessageIndex: state.lastWrittenMessageIndex,
         lastWrittenSummaryIndex: state.lastWrittenSummaryIndex
       });
+      contextFailures = 0;
+      backoffUntil = 0;
+      if (diagnostics.scaleUsed !== void 0) budgetScale = Math.min(1, Math.max(MIN_BUDGET_SCALE, diagnostics.scaleUsed));
       deps.costTracker.record(digest);
       deps.indexAddDigested(id, digest, { batched: false });
     } else {
       lastError = "digest generation failed (no tool call or validation error after retry)";
+      if (diagnostics.contextWindowExceeded) {
+        contextFailures++;
+        budgetScale = Math.max(MIN_BUDGET_SCALE, (diagnostics.scaleUsed ?? budgetScale) / 2);
+        const wait = contextBackoffMs(contextFailures);
+        backoffUntil = now() + wait;
+        lastError = "digest input exceeds the model's context window";
+        log.warn(
+          { comp: "digest", provider: model.provider, model: model.id, failures: contextFailures, nextBudgetScale: budgetScale, backoffMs: wait },
+          "digest input rejected as too large; backing off"
+        );
+      }
     }
     if (!disposed && state.dirty && (!deps.isCurrentGeneration || deps.isCurrentGeneration())) {
       state.dirty = false;
@@ -2777,9 +2864,9 @@ function installDigestLifecycle(pi, deps) {
       return;
     }
     const debounceMs = config.debounceSeconds * 1e3;
-    const now = Date.now();
+    const now2 = Date.now();
     const lastWrite = state.lastWriteTime ?? 0;
-    const elapsed = now - lastWrite;
+    const elapsed = now2 - lastWrite;
     if (elapsed >= debounceMs) {
       void fireDigest();
     } else {
@@ -2809,6 +2896,9 @@ function installDigestLifecycle(pi, deps) {
     const savedBuilderState = deps.storage.loadBuilderState(sessionId);
     state = emptyBuilderState();
     state.lastDigest = savedDigest;
+    budgetScale = 1;
+    contextFailures = 0;
+    backoffUntil = 0;
     abortTitle();
     titleAttempted = false;
     if (savedBuilderState) {

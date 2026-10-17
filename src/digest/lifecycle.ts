@@ -28,9 +28,9 @@ import type { Model, Api } from "@earendil-works/pi-ai";
 
 import type { SessionDigest } from "./schema";
 import type { DigestConfig } from "./config";
-import type { BuilderState } from "./builder";
+import type { BuilderState, GenerateDiagnostics } from "./builder";
 import type { CompleteFn } from "./completion";
-import { emptyBuilderState } from "./builder";
+import { emptyBuilderState, MIN_BUDGET_SCALE } from "./builder";
 import { resolveHostCompleteFn } from "./completion";
 import type { HostModelRegistry } from "./completion";
 import type { BuilderStateOnDisk } from "./storage";
@@ -57,6 +57,8 @@ export interface LifecycleBuilder {
 			signal?: AbortSignal;
 			resummarizeTokenThreshold?: number;
 			completeFn?: CompleteFn;
+			budgetScale?: number;
+			diagnostics?: GenerateDiagnostics;
 		},
 	) => Promise<{ digest: SessionDigest; anchor: number } | null>;
 	/**
@@ -121,7 +123,15 @@ export interface LifecycleDeps {
 	 * own lifecycleGen counter so isCurrentGeneration can compare both values.
 	 */
 	onSessionStartCaptureGeneration?: () => void;
+
+	/** Clock, injectable for tests. Default Date.now. */
+	now?: () => number;
 }
+
+/** First wait after a context-window failure; doubles per consecutive failure up to the max. */
+export const CONTEXT_BACKOFF_BASE_MS = 10 * 60_000;
+export const CONTEXT_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+export const contextBackoffMs = (failures: number) => Math.min(CONTEXT_BACKOFF_MAX_MS, CONTEXT_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1));
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -186,6 +196,12 @@ export function installDigestLifecycle(
 
 	/** Last error message from a failed digest attempt. */
 	let lastError: string | null = null;
+	// Context-window backoff, per session, in memory. A session whose digest input the provider rejects as too large used to be
+	// retried at every agent_end and compaction, each time sending the same oversized prompt.
+	const now = deps.now ?? Date.now;
+	let budgetScale = 1;
+	let contextFailures = 0;
+	let backoffUntil = 0;
 
 	/** Pending debounce timer (from agent_end when debounce window not elapsed). */
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -284,6 +300,7 @@ export function installDigestLifecycle(
 		if (disposed) return;
 		if (deps.isCurrentGeneration && !deps.isCurrentGeneration()) return;
 		if (!currentModel || !sessionId || !currentCtx) return;
+		if (now() < backoffUntil) return; // backing off after a context-window error; no request, no dirty flag, no follow-up loop
 		if (state.pendingCall) {
 			state.dirty = true;
 			return;
@@ -307,6 +324,7 @@ export function installDigestLifecycle(
 		const view = liveConversationView(ctx.sessionManager);
 
 		let result: { digest: SessionDigest; anchor: number } | null = null;
+		const diagnostics: GenerateDiagnostics = {};
 		try {
 			const completeFn = await resolveHostCompleteFn(
 				ctx.modelRegistry as unknown as HostModelRegistry,
@@ -316,6 +334,8 @@ export function installDigestLifecycle(
 				signal: ac.signal,
 				resummarizeTokenThreshold: config.resummarizeTokenThreshold,
 				completeFn,
+				budgetScale,
+				diagnostics,
 			});
 		} catch (err: unknown) {
 			const emsg = err instanceof Error ? err.message : String(err);
@@ -376,11 +396,26 @@ export function installDigestLifecycle(
 				lastWrittenSummaryIndex: state.lastWrittenSummaryIndex,
 			});
 
+			contextFailures = 0;
+			backoffUntil = 0;
+			if (diagnostics.scaleUsed !== undefined) budgetScale = Math.min(1, Math.max(MIN_BUDGET_SCALE, diagnostics.scaleUsed));
+
 			deps.costTracker.record(digest);
 			deps.indexAddDigested(id, digest, { batched: false });
 		} else {
 			// ── 4.7 Failure path ──────────────────────────────────────────────
 			lastError = "digest generation failed (no tool call or validation error after retry)";
+			if (diagnostics.contextWindowExceeded) {
+				contextFailures++;
+				budgetScale = Math.max(MIN_BUDGET_SCALE, (diagnostics.scaleUsed ?? budgetScale) / 2);
+				const wait = contextBackoffMs(contextFailures);
+				backoffUntil = now() + wait;
+				lastError = "digest input exceeds the model's context window";
+				log.warn(
+					{ comp: "digest", provider: model.provider, model: model.id, failures: contextFailures, nextBudgetScale: budgetScale, backoffMs: wait },
+					"digest input rejected as too large; backing off",
+				);
+			}
 			// Prior digest left untouched; do NOT call setSessionName.
 		}
 
@@ -460,6 +495,7 @@ export function installDigestLifecycle(
 
 		state = emptyBuilderState();
 		state.lastDigest = savedDigest;
+		budgetScale = 1; contextFailures = 0; backoffUntil = 0;
 		abortTitle();
 		titleAttempted = false;
 
