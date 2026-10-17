@@ -87,58 +87,98 @@ function serializeView(view: ConversationView): string {
 	return parts.join("\n\n");
 }
 
+/** First user message is kept for context but never allowed to dominate the budget. */
+const FIRST_MESSAGE_MAX_CHARS = 4_000;
+/** Lower bound for the compaction-summary share, so tiny windows still keep small summaries. */
+const SUMMARY_FLOOR_CHARS = 12_000;
+
+/** Keep the start and end of an over-long text, with an explicit marker for what was dropped. */
+export function clipMiddle(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const marker = (n: number) => `
+[... ${n} characters omitted ...]
+`;
+	const room = Math.max(0, max - marker(text.length).length);
+	const head = Math.ceil(room * 2 / 3), tail = room - head;
+	return text.slice(0, head) + marker(text.length - head - tail) + (tail > 0 ? text.slice(text.length - tail) : "");
+}
+
 /**
  * Cap the input view to fit within the model's effective context budget.
  *
  * Budget formula (in chars, approximating tokens×4):
- *   min(100_000, contextWindow×4 − maxTokens×4 − envelope)
+ *   min(100_000, contextWindow×4 − maxTokens×4 − envelope) × scale
  *
  * where `envelope` is 4000 when prev-digest is included in the prompt
- * (incremental mode), or 2000 otherwise (full mode).
+ * (incremental mode), or 2000 otherwise (full mode), and `scale` (0 < scale ≤ 1)
+ * is lowered after the provider reported a context-window error.
  *
- * Truncation strategy when over budget:
- *   1. Keep ALL compaction summaries (high-signal, small)
- *   2. Keep the first user message (session opener)
- *   3. Append the most-recent messages from the tail until budget is exhausted
- *   4. Middle messages are dropped
+ * Every part of the prompt is held to the budget (a compaction summary can be ~300 000 chars
+ * and a long session can carry dozens of them; keeping them all uncapped made the prompt exceed
+ * the window on every attempt):
+ *   1. Compaction summaries get at most max(12 000, 60% of the budget), newest first. The newest
+ *      one supersedes the earlier ones, so older ones are kept only while they fit whole; a newest
+ *      summary that alone exceeds the share is clipped (start and end kept, middle marked).
+ *   2. The first user message (session opener) is kept, clipped to 4 000 chars.
+ *   3. The most-recent messages from the tail fill what is left; middle messages are dropped.
  *
- * Applied to both full and incremental modes.
+ * A view already within the budget is returned unchanged. Applied to both full and incremental modes.
  */
 export function capInput(
 	view: ConversationView,
 	model: Model<Api>,
 	includesPrevDigest: boolean,
+	scale = 1,
 ): ConversationView {
 	const envelope = includesPrevDigest ? 4000 : 2000;
 	const contextChars = (model.contextWindow ?? 25_000) * 4;
 	const maxTokChars = (model.maxTokens ?? 4_096) * 4;
-	const cap = Math.min(100_000, contextChars - maxTokChars - envelope);
+	const factor = Number.isFinite(scale) && scale > 0 ? Math.min(1, scale) : 1;
+	const cap = Math.floor(Math.min(100_000, contextChars - maxTokChars - envelope) * factor);
 
 	const serialized = serializeView(view);
 	if (serialized.length <= cap) return view;
 
-	const summaryText = view.compactionSummaries.join("\n\n");
-	const firstMsg = view.messages[0] ?? null;
-	const firstMsgText = firstMsg ? `${firstMsg.role}: ${firstMsg.text}` : "";
-	const overhead = summaryText.length + firstMsgText.length + 100;
+	// 1. compaction summaries, newest first, within their share
+	const summaryBudget = Math.max(SUMMARY_FLOOR_CHARS, Math.floor(cap * 0.6));
+	const keptSummaries: string[] = [];
+	let summaryUsed = 0, omitted = 0;
+	for (let i = view.compactionSummaries.length - 1; i >= 0; i--) {
+		const text = view.compactionSummaries[i];
+		const cost = text.length + 2;
+		if (keptSummaries.length === 0 && cost > summaryBudget) { const clipped = clipMiddle(text, summaryBudget - 2); keptSummaries.unshift(clipped); summaryUsed += clipped.length + 2; continue; }
+		if (summaryUsed + cost > summaryBudget) { omitted++; continue; }
+		keptSummaries.unshift(text); summaryUsed += cost;
+	}
+	const summaries = omitted > 0 ? [`[${omitted} earlier compaction summaries omitted]`, ...keptSummaries] : keptSummaries;
+	if (omitted > 0) summaryUsed += summaries[0].length + 2;
 
+	// 2. first message, clipped
+	const firstMsg = view.messages[0] ?? null;
+	const firstText = firstMsg ? clipMiddle(firstMsg.text, FIRST_MESSAGE_MAX_CHARS) : "";
+	const firstMsgText = firstMsg ? `${firstMsg.role}: ${firstText}` : "";
+	const overhead = summaryUsed + firstMsgText.length + 100;
+
+	// 3. recent messages fill the rest
 	let remaining = Math.max(0, cap - overhead);
 
 	// Walk from the tail, accumulating recent messages
 	const tail: ConversationView["messages"] = [];
 	for (let i = view.messages.length - 1; i >= 1; i--) {
 		const msg = view.messages[i];
-		const len = `${msg.role}: ${msg.text}\n\n`.length;
+		const len = `${msg.role}: ${msg.text}
+
+`.length;
 		if (len > remaining) break;
 		remaining -= len;
 		tail.unshift(msg);
 	}
 
 	const messages: ConversationView["messages"] = [];
-	if (firstMsg) messages.push(firstMsg);
+	if (firstMsg) messages.push(firstText === firstMsg.text ? firstMsg : { ...firstMsg, text: firstText });
 	messages.push(...tail);
 
-	return { messages, compactionSummaries: view.compactionSummaries };
+	return { messages, compactionSummaries: summaries };
 }
 
 // ─── Prompt building ──────────────────────────────────────────────────────────
@@ -197,6 +237,7 @@ export function buildPrompt(
 	view: ConversationView,
 	threshold: number,
 	model: Model<Api>,
+	budgetScale = 1,
 ): { mode: "incremental" | "full"; systemPrompt: string; userMessage: string } {
 	const convTokens = estimateTokens(serializeView(view));
 	const tokensSinceLastWrite = convTokens - state.convTokensAtLastWrite;
@@ -209,7 +250,7 @@ export function buildPrompt(
 
 	if (mode === "incremental") {
 		const delta = extractDelta(view, state.lastWrittenMessageIndex);
-		const capped = capInput(delta, model, /* includesPrevDigest */ true);
+		const capped = capInput(delta, model, /* includesPrevDigest */ true, budgetScale);
 		const deltaText = serializeForPrompt(capped);
 		userMessage =
 			`Previous headline: ${JSON.stringify(state.lastDigest!.headline)}\n` +
@@ -219,7 +260,7 @@ export function buildPrompt(
 			`Update the digest if anything material changed. Otherwise repeat the previous digest verbatim. ` +
 			`Call submit_digest now.`;
 	} else {
-		const capped = capInput(view, model, /* includesPrevDigest */ false);
+		const capped = capInput(view, model, /* includesPrevDigest */ false, budgetScale);
 		const convText = serializeForPrompt(capped);
 		userMessage =
 			`Here is the full conversation to digest:\n\n${convText}\n\n` +
@@ -239,7 +280,27 @@ export interface GenerateOpts {
 	completeFn?: CompleteFn;
 	/** @deprecated Test compatibility alias. Prefer `completeFn`. */
 	_completeFn?: CompleteFn;
+	/** Input-budget multiplier (0 < scale <= 1). The lifecycle lowers it after a context-window error. Default 1. */
+	budgetScale?: number;
+	/** Filled in by generateDigest so the caller can react without a changed return type. */
+	diagnostics?: GenerateDiagnostics;
 }
+
+export interface GenerateDiagnostics {
+	/** True when the provider rejected the input as exceeding the context window on the last attempt. */
+	contextWindowExceeded?: boolean;
+	/** The budget scale used by the last attempt. */
+	scaleUsed?: number;
+}
+
+/** Provider errors that mean "the input is too large", not a transient failure. Mirrors pi-ai's overflow patterns without a runtime import. */
+const CONTEXT_OVERFLOW = /exceeds? the context window|context[ _-]?(window|length)[^.]{0,40}(exceed|too|limit)|maximum context|prompt is too long|input is too long|too many (input )?tokens|reduce the length of the (messages|prompt)|context_length_exceeded/i;
+const NOT_OVERFLOW = /rate[ _-]?limit|throttl|quota|overloaded/i;
+export function isContextWindowError(message: string | undefined): boolean {
+	return !!message && !NOT_OVERFLOW.test(message) && CONTEXT_OVERFLOW.test(message);
+}
+/** Smallest budget scale a retry will use. */
+export const MIN_BUDGET_SCALE = 0.05;
 
 /**
  * Generate a SessionDigest for a session conversation.
@@ -265,7 +326,12 @@ export async function generateDigest(
 		throw new Error("generateDigest requires a host-bound completeFn");
 	}
 
-	const { systemPrompt, userMessage } = buildPrompt(state, view, threshold, model);
+	const baseScale = Number.isFinite(opts.budgetScale) && (opts.budgetScale as number) > 0 ? Math.min(1, opts.budgetScale as number) : 1;
+	const diag = opts.diagnostics;
+	if (diag) { diag.contextWindowExceeded = false; diag.scaleUsed = baseScale; }
+	let contextRejected = false; // set by attemptCall when the provider says the input is too large
+
+	const { systemPrompt, userMessage } = buildPrompt(state, view, threshold, model, baseScale);
 
 	// Pass `submit_digest` as a capture-only tool on every provider. Direct API
 	// providers return the tool call as terminal output. claude-bridge ≥ the
@@ -311,6 +377,7 @@ export async function generateDigest(
 		} catch (err: unknown) {
 			const msg2 = err instanceof Error ? err.message : String(err);
 			log.warn({ comp: "digest", provider: model.provider, model: model.id, err: msg2 }, "digest complete() threw");
+			contextRejected = isContextWindowError(msg2);
 			return null;
 		}
 
@@ -322,6 +389,7 @@ export async function generateDigest(
 		if ((response as { stopReason?: string }).stopReason === "error") {
 			const errorMessage =
 				(response as { errorMessage?: string }).errorMessage ?? "unknown error";
+			contextRejected = isContextWindowError(errorMessage);
 			log.warn(
 				{ comp: "digest", provider: model.provider, model: model.id, errorMessage },
 				"digest completion returned an error response",
@@ -374,16 +442,29 @@ export async function generateDigest(
 	};
 
 	// First attempt
+	contextRejected = false;
 	const first = await attemptCall(systemPrompt, userMessage);
 	if (first) {
 		return { digest: first.digest, anchor: view.messages.length };
 	}
 
-	// Retry with a stricter prompt
+	if (contextRejected) {
+		// The same input would be rejected again, so a stricter prompt is pointless: retry ONCE with half the budget.
+		const scale = Math.max(MIN_BUDGET_SCALE, baseScale / 2);
+		if (diag) diag.scaleUsed = scale;
+		const smaller = buildPrompt(state, view, threshold, model, scale);
+		contextRejected = false;
+		const retry = await attemptCall(smaller.systemPrompt, smaller.userMessage);
+		if (retry) return { digest: retry.digest, anchor: view.messages.length };
+		if (diag) diag.contextWindowExceeded = contextRejected;
+		return null;
+	}
+
+	// Retry with a stricter prompt (the failure was a missing tool call or a validation error, not the input size)
 	const second = await attemptCall(SYSTEM_PROMPT_STRICT, userMessage);
 	if (second) {
 		return { digest: second.digest, anchor: view.messages.length };
 	}
-
+	if (diag) diag.contextWindowExceeded = contextRejected;
 	return null;
 }

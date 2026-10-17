@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Digest: bound the prompt. Compaction summaries (newest first) and the first message are held to the
+  input budget, so a session with many large compactions no longer sends millions of characters.
+- Digest: after the provider rejects the input as too large, retry once with half the budget (not the
+  same input), then back off for that session (10 minutes, doubling, at most 6 hours) instead of
+  retrying at every turn and compaction.
+
 ## 2.2.0 (2026-10-03)
 
 - Name a new session from its first prompt as soon as it is submitted, using the
