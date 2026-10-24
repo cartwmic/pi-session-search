@@ -130,14 +130,14 @@ it("digest sync enumerates the reverse lookup once, not once per discovered file
   }
 });
 
-it("primer.enabled=false suppresses the fork's system-prompt primer", async () => {
+it("primer.enabled=false sends no primer message", async () => {
   const root = mkdtempSync(join(tmpdir(), "digest-primer-"));
   _setIndexWorkerEnabled(false);
   const host = createFakeHost(root, extension, { primer: { enabled: false }, sync: { interval: -1 } });
   try {
     writeSession(host.sessionsDir, "primer", "primer cobalt fixture");
     await host.start();
-    assert.equal(await host.primer(), undefined);
+    assert.equal(host.primer(), undefined);
   } finally {
     await host.shutdown();
     host.cleanup();

@@ -14,7 +14,10 @@ export interface FakeHost {
   notes: string[];
   start(): Promise<void>;
   shutdown(): Promise<void>;
-  primer(): Promise<string | undefined>;
+  /** Fire before_agent_start once and return the system prompt the run would send (the input when unchanged). */
+  systemPromptFor(base: string): Promise<string>;
+  /** Content of the primer message sent at session_start, if any. */
+  primer(): string | undefined;
   tool(name: string, params: Record<string, unknown>): Promise<string>;
   cleanup(): void;
 }
@@ -65,18 +68,22 @@ export function createFakeHost(
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
   const tools = new Map<string, any>();
   const sent: { message: any; options: any }[] = [];
+  const entries: any[] = [];
   const notes: string[] = [];
   extension({
     on: (event: string, fn: any) => handlers.set(event, [...(handlers.get(event) ?? []), fn]),
     registerTool: (t: any) => tools.set(t.name, t),
     registerCommand: () => {},
-    sendMessage: (message: any, options: any) => sent.push({ message, options }),
+    sendMessage: (message: any, options: any) => {
+      sent.push({ message, options });
+      entries.push({ type: "custom_message", customType: message.customType });
+    },
   });
   const ctx = {
     cwd: root,
     hasUI: true,
     ui: { notify: (m: string) => notes.push(m), setStatus: () => {} },
-    sessionManager: { getEntries: () => [], getSessionId: () => "active-fixture", getBranch: () => [] },
+    sessionManager: { getEntries: () => entries, getSessionId: () => "active-fixture", getBranch: () => [] },
     modelRegistry: { getAvailable: () => [], getProvider: () => undefined },
   };
 
@@ -88,7 +95,15 @@ export function createFakeHost(
     notes,
     start: async () => { for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start", reason: "startup" }, ctx); },
     shutdown: async () => { for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx); },
-    primer: async () => (await handlers.get("before_agent_start")?.[0]({ systemPrompt: "base" }, ctx))?.systemPrompt,
+    systemPromptFor: async (base) => {
+      let prompt = base;
+      for (const handler of handlers.get("before_agent_start") ?? []) {
+        const result = await handler({ systemPrompt: prompt, systemPromptOptions: { sections: {} } }, ctx);
+        if (result?.systemPrompt !== undefined) prompt = result.systemPrompt;
+      }
+      return prompt;
+    },
+    primer: () => sent.find((m) => m.message.customType === "pi-session-search-primer")?.message.content,
     tool: async (name, params) => (await tools.get(name).execute("call", params)).content[0].text,
     cleanup: () => {
       if (previousHome === undefined) delete process.env.PI_SESSION_SEARCH_HOME;

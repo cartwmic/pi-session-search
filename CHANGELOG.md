@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Primer: send the Recent Sessions primer once at `session_start` as a hidden custom message instead of appending it
+  to the system prompt on every run (upstream `a73dffb`, `cab1272`). The changing text (relative ages, message counts)
+  made the system prompt differ between runs and forced a full prompt-cache re-write each time. The primer keeps the
+  digest headlines, drops relative ages, and is skipped when the session already has one (`/reload`, resume).
 - Digest: bound the prompt. Compaction summaries (newest first) and the first message are held to the
   input budget, so a session with many large compactions no longer sends millions of characters.
 - Digest: after the provider rejects the input as too large, retry once with half the budget (not the

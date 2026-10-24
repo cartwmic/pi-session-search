@@ -116,8 +116,8 @@ describe("registration (Phase B) — module-load invariants", () => {
     )
     assert.equal(
       basCount,
-      2,
-      "before_agent_start: 1 from extension + 1 from lifecycle (initial title) = 2",
+      1,
+      "before_agent_start: only the lifecycle's (initial title); the primer never touches the system prompt",
     )
     assert.equal(aeCount, 1, "agent_end must be registered once (from lifecycle)")
     assert.equal(scCount, 1, "session_compact must be registered once (from lifecycle)")
