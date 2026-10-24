@@ -186,7 +186,7 @@ let currentRollup: CostRollup = emptyRollup();
 	// ("8m ago"); those would be wrong a minute later and can never be refreshed.
 	const PRIMER_CUSTOM_TYPE = "pi-session-search-primer";
 
-	async function injectPrimer(ctx: { cwd?: string; sessionManager: { getEntries: () => any[] } }): Promise<void> {
+	async function injectPrimer(ctx: { cwd?: string; sessionManager: { getEntries: () => any[] } }, myGen: number): Promise<void> {
 		if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
 		try {
 			// /reload and resume re-run session_start; the session already has its primer.
@@ -218,6 +218,8 @@ let currentRollup: CostRollup = emptyRollup();
 
 			const primer = `## Recent Sessions (this project)\n${lines.join("\n")}\n`;
 			const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
+			// A newer session_start (or shutdown) overtook us while we awaited the index.
+			if (myGen !== bootGeneration) return;
 			pi.sendMessage({ customType: PRIMER_CUSTOM_TYPE, content: trimmed, display: false });
 		} catch {
 			// The primer is a nicety; never break startup over it.
@@ -363,7 +365,7 @@ let currentRollup: CostRollup = emptyRollup();
     await Promise.race([loaded, new Promise<void>((r) => setTimeout(r, 1000).unref())]);
     // Only while the session is still empty: a primer sent after the user's first
     // message would sit after it, and the model would answer the primer.
-    if (loadedOk && myGen === bootGeneration) await injectPrimer(ctx);
+    if (loadedOk && myGen === bootGeneration) await injectPrimer(ctx, myGen);
 
 	});
 

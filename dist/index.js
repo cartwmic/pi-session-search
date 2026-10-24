@@ -3642,7 +3642,7 @@ function index_default(pi) {
     void sessionIndex.addDigest(sessionId, digest).catch((err) => log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed"));
   }
   const PRIMER_CUSTOM_TYPE = "pi-session-search-primer";
-  async function injectPrimer(ctx) {
+  async function injectPrimer(ctx, myGen) {
     if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
     try {
       if (ctx.sessionManager.getEntries().some((e) => e.type === "custom_message" && e.customType === PRIMER_CUSTOM_TYPE)) return;
@@ -3672,6 +3672,7 @@ function index_default(pi) {
 ${lines.join("\n")}
 `;
       const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
+      if (myGen !== bootGeneration) return;
       pi.sendMessage({ customType: PRIMER_CUSTOM_TYPE, content: trimmed, display: false });
     } catch {
     }
@@ -3793,7 +3794,7 @@ ${lines.join("\n")}
       ui.notify(`session-search init failed: ${indexError}`, "error");
     });
     await Promise.race([loaded, new Promise((r) => setTimeout(r, 1e3).unref())]);
-    if (loadedOk && myGen === bootGeneration) await injectPrimer(ctx);
+    if (loadedOk && myGen === bootGeneration) await injectPrimer(ctx, myGen);
   });
   lifecycleHandle = installDigestLifecycle(pi, {
     storage: { loadDigest, saveDigest, loadBuilderState, saveBuilderState },
