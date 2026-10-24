@@ -177,11 +177,20 @@ let currentRollup: CostRollup = emptyRollup();
   }
 
 
-	// ── Session primer (task 2.9) — no longer uses currentMode ────────────────
-	pi.on("before_agent_start", async (event, ctx) => {
-		if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
+	// ── Session primer ─────────────────────────────────────────────────────────
+	// Sent ONCE per session, at session_start, as a hidden custom message. It must
+	// never touch the system prompt: the primer's content changes between runs
+	// (new sessions, message counts, headlines), and any change to the system
+	// prompt makes the provider's prompt cache re-write the whole conversation.
+	// The primer is a snapshot at session start, so it carries no relative ages
+	// ("8m ago"); those would be wrong a minute later and can never be refreshed.
+	const PRIMER_CUSTOM_TYPE = "pi-session-search-primer";
 
+	async function injectPrimer(ctx: { cwd?: string; sessionManager: { getEntries: () => any[] } }): Promise<void> {
+		if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
 		try {
+			// /reload and resume re-run session_start; the session already has its primer.
+			if (ctx.sessionManager.getEntries().some((e: any) => e.type === "custom_message" && e.customType === PRIMER_CUSTOM_TYPE)) return;
 			if (await sessionIndex.size() === 0) return;
 			const cwd = ctx.cwd || "";
 			const projectSlug = cwd ? pathToSlug(cwd) : undefined;
@@ -201,20 +210,19 @@ let currentRollup: CostRollup = emptyRollup();
 					name = s.name || truncate(s.firstUserMessage, 80);
 				}
 				const date = s.startedAt.split("T")[0];
-				const rel = formatRelativeDate(s.startedAt);
 				const displayCwd = s.cwd.replace(homedir(), "~").slice(0, 60);
 				const msgs = `${s.userMessageCount} user, ${s.assistantMessageCount} assistant`;
 				const modelTag = s.models[0] ? ` Mode: ${s.models[0].split("/").pop()}` : "";
-				return `- **${rel}**: **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${modelTag}`;
+				return `- **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${modelTag}`;
 			}));
 
-			const primer = `\n\n## Recent Sessions (this project)\n${lines.join("\n")}\n`;
+			const primer = `## Recent Sessions (this project)\n${lines.join("\n")}\n`;
 			const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
-			return { systemPrompt: (event.systemPrompt || "") + trimmed };
+			pi.sendMessage({ customType: PRIMER_CUSTOM_TYPE, content: trimmed, display: false });
 		} catch {
-			return undefined;
+			// The primer is a nicety; never break startup over it.
 		}
-	});
+	}
 
 	// ── session_start (task 2.4 — 10-step procedure) ─────────────────────────
 	// Registered BEFORE lifecycle so verdict resolution runs first (task 2.5).
@@ -335,9 +343,11 @@ let currentRollup: CostRollup = emptyRollup();
         ui.notify(`session-search: sync failed: ${err.message}`, "warning");
       }
     };
+    let loadedOk = false;
     const loaded = index.load({ onError: (msg) => ui.notify(`session-search: ${msg}`, "warning") })
       .then(() => {
         if (myGen !== bootGeneration || indexState === "failed") return;
+        loadedOk = true;
         indexState = initialAction.skip ? "ready" : "warming";
         if (!initialAction.skip) {
           if (initialAction.delayMs) scheduleTimer(() => { void sync(); }, initialAction.delayMs);
@@ -351,6 +361,9 @@ let currentRollup: CostRollup = emptyRollup();
         ui.notify(`session-search init failed: ${indexError}`, "error");
       });
     await Promise.race([loaded, new Promise<void>((r) => setTimeout(r, 1000).unref())]);
+    // Only while the session is still empty: a primer sent after the user's first
+    // message would sit after it, and the model would answer the primer.
+    if (loadedOk && myGen === bootGeneration) await injectPrimer(ctx);
 
 	});
 

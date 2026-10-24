@@ -66,7 +66,7 @@ describe("index worker crash", () => {
     }
   });
 
-  it("skips the primer on every turn after worker death without repeating the crash report", { timeout: 10_000 }, async () => {
+  it("leaves the system prompt alone on every turn after worker death without repeating the crash report", { timeout: 10_000 }, async () => {
     const host = createFakeHost(ROOT, extension);
     const workerFile = join(ROOT, "crashing-worker.mjs");
     writeFileSync(workerFile, CRASHING_WORKER);
@@ -75,7 +75,7 @@ describe("index worker crash", () => {
       await host.start();
       assert.match(await untilUnavailable(host), /index worker exited with code 3/);
       for (let turn = 0; turn < 3; turn++) {
-        assert.equal(await host.primer(), undefined, `turn ${turn + 1} skips the primer`);
+        assert.equal(await host.systemPromptFor("base"), "base", `turn ${turn + 1} leaves the system prompt alone`);
       }
       assert.deepEqual(
         host.notes.filter((n) => /exited|fail/i.test(n)),

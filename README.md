@@ -261,10 +261,10 @@ Optional config fields carried from upstream:
 - `sync.interval`: milliseconds between syncs; `-1` disables the timer.
 - `sync.initialDelay`: milliseconds before startup sync; `-1` skips it.
 - `sync.disableForChild`: disable automatic sync in child/non-interactive processes.
-- `primer.enabled: false`: disable the fork's Recent Sessions system-prompt primer.
+- `primer.enabled: false`: disable the Recent Sessions primer (a hidden message sent once at session start).
 - `fusion: "vector-primary"`: preserve vector ranking and fill spare results with up to five keyword-only hits. Default: `"rrf"`.
 
-The fork keeps its digest-aware system-prompt primer rather than upstream's one-time custom message. Project-local `pi-session-search.localPath` / `pi-total-recall.localPath` settings relocate config and index; `PI_SESSION_SEARCH_HOME` still isolates global digest state.
+The primer uses digest headlines and is sent once at session start as a hidden custom message, like upstream. It never changes the system prompt, so the provider's prompt cache stays valid. Project-local `pi-session-search.localPath` / `pi-total-recall.localPath` settings relocate config and index; `PI_SESSION_SEARCH_HOME` still isolates global digest state.
 
 Validation: `npm ci && npm test && npm run check && npm run build`. Tests run serially to keep worker responsiveness and scaling measurements from contending with other test files. `python3 tests/blackbox/run.py` drives isolated Pi with a scripted model and local embedding backend; it never uses real sessions or paid providers.
 

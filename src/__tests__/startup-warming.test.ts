@@ -64,8 +64,9 @@ describe("startup indexing (in-process)", () => {
       assert.match(after, /ID: warm-a/);
       assert.match(after, /ID: warm-c/);
 
-      // Keep the fork's system-prompt primer (digest headlines), now async.
-      assert.match((await host.primer()) ?? "", /Recent Sessions/);
+      // The primer (digest headlines) goes out once at session start, as a message.
+      assert.match(host.primer() ?? "", /Recent Sessions/);
+      assert.equal(await host.systemPromptFor("base"), "base");
 
     } finally {
       await host.shutdown();

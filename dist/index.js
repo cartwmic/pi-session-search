@@ -3641,9 +3641,11 @@ function index_default(pi) {
     if (!sessionIndex || currentVerdict?.kind !== "digest-hybrid") return;
     void sessionIndex.addDigest(sessionId, digest).catch((err) => log.error({ comp: "indexAddDigested", sessionId, err: String(err?.message ?? err) }, "addDigested failed"));
   }
-  pi.on("before_agent_start", async (event, ctx) => {
+  const PRIMER_CUSTOM_TYPE = "pi-session-search-primer";
+  async function injectPrimer(ctx) {
     if (currentConfig?.primer?.enabled === false || !sessionIndex || indexState === "failed") return;
     try {
+      if (ctx.sessionManager.getEntries().some((e) => e.type === "custom_message" && e.customType === PRIMER_CUSTOM_TYPE)) return;
       if (await sessionIndex.size() === 0) return;
       const cwd = ctx.cwd || "";
       const projectSlug = cwd ? pathToSlug(cwd) : void 0;
@@ -3661,23 +3663,19 @@ function index_default(pi) {
           name = s.name || truncate(s.firstUserMessage, 80);
         }
         const date = s.startedAt.split("T")[0];
-        const rel = formatRelativeDate(s.startedAt);
         const displayCwd = s.cwd.replace(homedir4(), "~").slice(0, 60);
         const msgs = `${s.userMessageCount} user, ${s.assistantMessageCount} assistant`;
         const modelTag = s.models[0] ? ` Mode: ${s.models[0].split("/").pop()}` : "";
-        return `- **${rel}**: **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${modelTag}`;
+        return `- **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${modelTag}`;
       }));
-      const primer = `
-
-## Recent Sessions (this project)
+      const primer = `## Recent Sessions (this project)
 ${lines.join("\n")}
 `;
       const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
-      return { systemPrompt: (event.systemPrompt || "") + trimmed };
+      pi.sendMessage({ customType: PRIMER_CUSTOM_TYPE, content: trimmed, display: false });
     } catch {
-      return void 0;
     }
-  });
+  }
   pi.on("session_start", async (_event, ctx) => {
     const myGen = ++bootGeneration;
     const ui = {
@@ -3774,8 +3772,10 @@ ${lines.join("\n")}
         ui.notify(`session-search: sync failed: ${err.message}`, "warning");
       }
     };
+    let loadedOk = false;
     const loaded = index.load({ onError: (msg) => ui.notify(`session-search: ${msg}`, "warning") }).then(() => {
       if (myGen !== bootGeneration || indexState === "failed") return;
+      loadedOk = true;
       indexState = initialAction.skip ? "ready" : "warming";
       if (!initialAction.skip) {
         if (initialAction.delayMs) scheduleTimer(() => {
@@ -3793,6 +3793,7 @@ ${lines.join("\n")}
       ui.notify(`session-search init failed: ${indexError}`, "error");
     });
     await Promise.race([loaded, new Promise((r) => setTimeout(r, 1e3).unref())]);
+    if (loadedOk && myGen === bootGeneration) await injectPrimer(ctx);
   });
   lifecycleHandle = installDigestLifecycle(pi, {
     storage: { loadDigest, saveDigest, loadBuilderState, saveBuilderState },
